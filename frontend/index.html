@@ -120,7 +120,7 @@
       <label>Test name<input name="name" required maxlength="100" value="Homepage load"></label>
       <label>Target URL<input name="target_url" type="url" required placeholder="https://api.example.com/products"></label>
       <div class="row">
-        <label>Users<input name="users" type="number" min="1" value="10" required></label>
+        <label>Users / profile peak<input name="users" type="number" min="1" value="10" required></label>
         <label>Duration (seconds)<input name="duration_seconds" type="number" min="1" value="60" required></label>
       </div>
       <details>
@@ -136,6 +136,10 @@
             <label>Think time (ms)<input name="think_time_ms" type="number" min="0" value="0"></label>
             <label>Timeout (ms)<input name="timeout_ms" type="number" min="100" value="30000"></label>
           </div>
+          <label>Optional step-load profile (time in seconds : target users)
+            <textarea name="profile" rows="3" placeholder="0:10&#10;30:50&#10;60:100"></textarea>
+          </label>
+          <small>Start at 0, increase both time and users on each line, and make the final user count match Users / profile peak. Leave ramp-up at 0 for a profile.</small>
           <label>Expected status codes<input name="expected_status_codes" value="200" placeholder="200, 201"></label>
           <label>Headers, one per line<textarea name="headers" placeholder="Accept: application/json"></textarea></label>
           <label>Request body<textarea name="body" placeholder='{"sku": "A-100"}'></textarea></label>
@@ -214,6 +218,14 @@ function parseHeaders(text) {
   }
   return headers;
 }
+function parseProfile(text) {
+  const lines = text.split("\n").map(line => line.trim()).filter(Boolean);
+  return lines.map((line, i) => {
+    const match = line.match(/^(\d+)\s*:\s*(\d+)$/);
+    if (!match) throw new Error(`Profile line ${i + 1} must look like seconds:users`);
+    return { time_seconds: +match[1], users: +match[2] };
+  });
+}
 function formToConfig(f) {
   const v = (n) => f.elements[n].value;
   const cfg = {
@@ -224,6 +236,8 @@ function formToConfig(f) {
     headers: parseHeaders(v("headers")),
     thresholds: { max_error_rate_percent: +v("max_error_rate_percent"), max_p95_ms: v("max_p95_ms") ? +v("max_p95_ms") : null },
   };
+  const profile = parseProfile(v("profile"));
+  if (profile.length) cfg.profile = profile;
   if (v("body").trim() && v("method") !== "GET") cfg.body = v("body");
   return cfg;
 }
@@ -337,7 +351,7 @@ function renderRun(run, points) {
     h("div", { class: "head" },
       h("div", {},
         h("h1", {}, run.name, " ", badge(run)),
-        h("div", { class: "url" }, `${c.method} ${c.target_url} · ${c.users} users · ${c.duration_seconds}s${c.ramp_up_seconds ? ` with ${c.ramp_up_seconds}s ramp-up` : ""}${headersShown ? ` · ${headersShown} custom header${headersShown > 1 ? "s" : ""}` : ""}`),
+        h("div", { class: "url" }, `${c.method} ${c.target_url} · ${c.profile ? `step load to ${c.users} users` : `${c.users} users`} · ${c.duration_seconds}s${c.profile ? ` · ${c.profile.map(s => `${s.users} at ${s.time_seconds}s`).join(" → ")}` : c.ramp_up_seconds ? ` with ${c.ramp_up_seconds}s ramp-up` : ""}${headersShown ? ` · ${headersShown} custom header${headersShown > 1 ? "s" : ""}` : ""}`),
         running ? h("p", { class: "verdict" }, "Running. Results update every two seconds.") : (v && h("p", { class: `verdict ${v.cls}` }, v.text))),
       running ? h("button", { class: "btn danger", onclick: stopRun }, "Stop test") : null),
     running ? h("div", { class: "progress" }, h("div", { style: `width:${pct}%` })) : null,

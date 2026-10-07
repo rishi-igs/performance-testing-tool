@@ -506,7 +506,26 @@ Create a FastAPI application that accepts a target URL, user count, duration, an
 
 ### Phase 2: Traffic Profiles
 
-Add constant load, ramp-up, spike, stress, soak, load ramp-down, pauses, and multiple phases.
+Step-load profiles are implemented. Each increasing step adds users at its configured offset,
+and those users stay active until the test duration ends. The final step must start before the
+test ends and match the configured peak `users`; `ramp_up_seconds` must be zero when a profile
+is used. Omitting the profile retains the existing fixed-user behavior.
+
+```yaml
+users: 100
+duration_seconds: 90
+ramp_up_seconds: 0
+profile:
+  - time_seconds: 0
+    users: 10
+  - time_seconds: 30
+    users: 50
+  - time_seconds: 60
+    users: 100
+```
+
+Still to add in this phase: ramp-up profiles, spikes, soak, load ramp-down, pauses, and
+multiple test phases.
 
 ### Phase 3: HAR Import, Script Preparation, and Debugging
 

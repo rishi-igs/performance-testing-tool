@@ -16,6 +16,13 @@ class Thresholds(BaseModel):
     max_p95_ms: int | None = Field(1000, ge=1)
 
 
+class TrafficStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    time_seconds: int = Field(ge=0)
+    users: int = Field(ge=1)
+
+
 class LoadTestConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -27,6 +34,7 @@ class LoadTestConfig(BaseModel):
     users: int = Field(10, ge=1)
     duration_seconds: int = Field(60, ge=1)
     ramp_up_seconds: int = Field(0, ge=0)
+    profile: list[TrafficStep] | None = Field(default=None, min_length=2, max_length=100)
     think_time_ms: int = Field(0, ge=0, le=60_000)
     timeout_ms: int = Field(30_000, ge=100, le=300_000)
     expected_status_codes: list[int] = Field(default_factory=lambda: [200], min_length=1)
@@ -60,9 +68,23 @@ class LoadTestConfig(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _ramp_within_duration(self) -> "LoadTestConfig":
+    def _validate_load_schedule(self) -> "LoadTestConfig":
         if self.ramp_up_seconds > self.duration_seconds:
             raise ValueError("ramp_up_seconds cannot be longer than duration_seconds")
+        if self.profile is not None:
+            if self.ramp_up_seconds:
+                raise ValueError("ramp_up_seconds must be 0 when a step-load profile is set")
+            if self.profile[0].time_seconds != 0:
+                raise ValueError("profile must start at time_seconds 0")
+            if self.profile[-1].users != self.users:
+                raise ValueError("users must equal the final profile step's user count")
+            for previous, current in zip(self.profile, self.profile[1:]):
+                if current.time_seconds <= previous.time_seconds:
+                    raise ValueError("profile time_seconds values must be strictly increasing")
+                if current.users <= previous.users:
+                    raise ValueError("profile user counts must be strictly increasing")
+            if self.profile[-1].time_seconds >= self.duration_seconds:
+                raise ValueError("the final profile step must start before duration_seconds")
         return self
 
     def masked(self) -> dict:

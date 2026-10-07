@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -158,10 +159,9 @@ class TestExecutor:
         cmd.exe to execute the batch file.
         """
 
+        launcher = self._launcher()
         return [
-            "cmd.exe",
-            "/c",
-            self.settings.jmeter_bin,
+            *launcher,
             "-n",
             "-t",
             str(paths["plan"]),
@@ -174,6 +174,18 @@ class TestExecutor:
             str(paths["report"]),
             *jmeter_properties(),
         ]
+
+    def _launcher(self) -> list[str]:
+        if self.settings.jmeter_bin.lower().endswith(".py"):
+            return [sys.executable, self.settings.jmeter_bin]
+        return ["cmd.exe", "/c", self.settings.jmeter_bin]
+
+    @staticmethod
+    def _jmeter_environment() -> dict[str, str]:
+        # JMETER_BIN is also reserved by JMeter's Windows launcher for its bin directory.
+        env = os.environ.copy()
+        env.pop("JMETER_BIN", None)
+        return env
 
     @staticmethod
     def _signal(
@@ -233,6 +245,7 @@ class TestExecutor:
                     stdout=out,
                     stderr=subprocess.STDOUT,
                     cwd=paths["dir"],
+                    env=self._jmeter_environment(),
                     start_new_session=True,
                 )
 
@@ -405,15 +418,14 @@ class TestExecutor:
 
             subprocess.run(
                 [
-                    "cmd.exe",
-                    "/c",
-                    self.settings.jmeter_bin,
+                    *self._launcher(),
                     "-g",
                     str(paths["jtl"]),
                     "-o",
                     str(paths["report"]),
                 ],
                 cwd=paths["dir"],
+                env=self._jmeter_environment(),
                 timeout=120,
                 capture_output=True,
                 check=False,

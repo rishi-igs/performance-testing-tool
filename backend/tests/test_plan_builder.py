@@ -49,3 +49,22 @@ def test_expected_status_codes_and_optional_parts():
 
 def test_no_body_means_no_raw_body_flag():
     assert all(e.get("name") != "HTTPSampler.postBodyRaw" for e in plan().iter())
+
+
+def test_step_profile_generates_incremental_scheduled_thread_groups():
+    root = plan(
+        users=100,
+        duration_seconds=90,
+        profile=[
+            {"time_seconds": 0, "users": 10},
+            {"time_seconds": 30, "users": 50},
+            {"time_seconds": 60, "users": 100},
+        ],
+    )
+    groups = root.findall(".//ThreadGroup")
+    assert [prop(group, "ThreadGroup.num_threads") for group in groups] == ["10", "40", "50"]
+    assert [prop(group, "ThreadGroup.delay") for group in groups] == ["0", "30", "60"]
+    assert [prop(group, "ThreadGroup.duration") for group in groups] == ["90", "60", "30"]
+    assert [prop(group, "ThreadGroup.ramp_time") for group in groups] == ["0", "0", "0"]
+    assert len(root.findall(".//HTTPSamplerProxy")) == 3
+    assert [prop(sampler, "HTTPSampler.method") for sampler in root.findall(".//HTTPSamplerProxy")] == ["GET"] * 3

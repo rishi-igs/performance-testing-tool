@@ -7,6 +7,16 @@ method: GET
 users: 20
 duration_seconds: 30
 ramp_up_seconds: 10
+# For step load, set ramp_up_seconds to 0 and configure increasing targets:
+# users: 100
+# duration_seconds: 90
+# profile:
+#   - time_seconds: 0
+#     users: 10
+#   - time_seconds: 30
+#     users: 50
+#   - time_seconds: 60
+#     users: 100
 think_time_ms: 100
 timeout_ms: 10000
 expected_status_codes: [200]

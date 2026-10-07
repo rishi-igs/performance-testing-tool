@@ -1,0 +1,19 @@
+name: Local step-load example
+target_url: http://127.0.0.1:9000/slow?ms=100
+method: GET
+users: 8
+duration_seconds: 20
+ramp_up_seconds: 0
+profile:
+  - time_seconds: 0
+    users: 2
+  - time_seconds: 5
+    users: 5
+  - time_seconds: 10
+    users: 8
+think_time_ms: 100
+timeout_ms: 10000
+expected_status_codes: [200]
+thresholds:
+  max_error_rate_percent: 1.0
+  max_p95_ms: 1000

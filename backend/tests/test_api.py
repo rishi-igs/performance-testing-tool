@@ -66,6 +66,24 @@ def test_expected_status_codes_are_respected(client, target_url):
     assert m["error_rate_percent"] == 0 and m["verdict"] == "pass"
 
 
+def test_step_profile_runs_and_is_returned_in_test_config(client, target_url):
+    config = body(
+        target_url,
+        users=3,
+        duration_seconds=4,
+        profile=[{"time_seconds": 0, "users": 1}, {"time_seconds": 2, "users": 3}],
+    )
+    created = client.post("/tests", json=config)
+    assert created.status_code == 201, created.text
+    test_id = created.json()["id"]
+
+    result = wait_for(client, test_id)
+    assert result["status"] == "completed", result
+    assert result["metrics"]["peak_users"] == 3
+    saved = client.get(f"/tests/{test_id}").json()["config"]
+    assert saved["profile"] == config["profile"]
+
+
 def test_connection_failures_detected(client):
     test_id = client.post("/tests", json={"name": "down", "target_url": "http://127.0.0.1:9/x",
                                           "users": 2, "duration_seconds": 2}).json()["id"]
@@ -92,6 +110,9 @@ def test_input_validation_and_limits(client, target_url):
     assert client.post("/tests", json={"name": "x", "target_url": "nope"}).status_code == 422
     assert client.post("/tests", json=body(target_url, users=500)).status_code == 422
     assert client.post("/tests", json=body(target_url, duration_seconds=99999)).status_code == 422
+    assert client.post("/tests", json=body(
+        target_url, users=500, profile=[{"time_seconds": 0, "users": 1}, {"time_seconds": 1, "users": 500}],
+    )).status_code == 422
     assert client.get("/tests/t_missing").status_code == 404
 
 

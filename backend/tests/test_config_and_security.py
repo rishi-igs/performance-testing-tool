@@ -26,6 +26,29 @@ def test_rejects_ramp_longer_than_duration():
         cfg(duration_seconds=10, ramp_up_seconds=20)
 
 
+def test_accepts_valid_increasing_step_profile():
+    c = cfg(users=100, duration_seconds=90, profile=[
+        {"time_seconds": 0, "users": 10},
+        {"time_seconds": 30, "users": 50},
+        {"time_seconds": 60, "users": 100},
+    ])
+    assert c.profile[-1].users == c.users
+
+
+@pytest.mark.parametrize("overrides", [
+    {"profile": [{"time_seconds": 5, "users": 10}, {"time_seconds": 10, "users": 20}], "users": 20},
+    {"profile": [{"time_seconds": 0, "users": 10}, {"time_seconds": 10, "users": 20}], "users": 20, "duration_seconds": 10},
+    {"profile": [{"time_seconds": 0, "users": 10}, {"time_seconds": 10, "users": 20}], "users": 20, "ramp_up_seconds": 2},
+    {"profile": [{"time_seconds": 0, "users": 10}, {"time_seconds": 10, "users": 20}, {"time_seconds": 9, "users": 30}], "users": 30},
+    {"profile": [{"time_seconds": 0, "users": 10}, {"time_seconds": 10, "users": 10}], "users": 10},
+    {"profile": [{"time_seconds": 0, "users": 10}, {"time_seconds": 10, "users": 20}], "users": 30},
+    {"profile": [{"time_seconds": 0, "users": 10}]},
+])
+def test_rejects_invalid_step_profiles(overrides):
+    with pytest.raises(ValidationError):
+        cfg(**overrides)
+
+
 def test_rejects_header_injection():
     with pytest.raises(ValidationError):
         cfg(headers={"X-A": "ok\r\nInjected: 1"})

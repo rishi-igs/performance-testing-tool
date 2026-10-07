@@ -4,9 +4,9 @@ A management layer around Apache JMeter. You describe a test (URL, users, durati
 the tool generates the JMeter plan, runs JMeter headlessly, tracks the run, parses the
 results into p50/p95/p99, throughput and error rate, and explains problems in plain language.
 
-**Status: Phase 1 of the roadmap** (first working version). One request per test,
-fixed users and duration, API + dashboard + CLI. HAR import, traffic profiles,
-CI baselines, etc. come in later phases (see "What's next").
+**Status: Phase 2 in progress.** One request per test, fixed-user tests and step-load profiles,
+API + dashboard + CLI. HAR import, other traffic profiles, CI baselines, etc. are still to come
+(see "What's next").
 
 ## Quick start
 
@@ -52,6 +52,24 @@ Set `PERF_API_KEY` if the server has `API_KEY` set.
 
 ## Configuration of a test
 
+An optional `profile` configures an increasing step load. Each step adds users at its
+`time_seconds` offset; added users stay active until the test ends. The final step must
+start before `duration_seconds`, match `users`, and `ramp_up_seconds` must be zero.
+Omit `profile` to retain the fixed-user load behavior.
+
+```yaml
+users: 100                 # peak users; must match the final step
+duration_seconds: 90
+ramp_up_seconds: 0
+profile:
+  - time_seconds: 0
+    users: 10
+  - time_seconds: 30
+    users: 50
+  - time_seconds: 60
+    users: 100
+```
+
 | Field | Default | Notes |
 |---|---|---|
 | `name` | required | |
@@ -62,6 +80,7 @@ Set `PERF_API_KEY` if the server has `API_KEY` set.
 | `users` | 10 | virtual users |
 | `duration_seconds` | 60 | total run time, including ramp-up |
 | `ramp_up_seconds` | 0 | users start evenly over this period |
+| `profile` | none | optional increasing step-load targets (`time_seconds`, `users`); final target must equal `users` |
 | `think_time_ms` | 0 | pause between requests per user |
 | `timeout_ms` | 30000 | connect and response timeout |
 | `expected_status_codes` | `[200]` | anything else counts as a failure |
@@ -136,7 +155,7 @@ the pipeline can be tested without JMeter installed.
 
 | Phase | Adds |
 |---|---|
-| 2 | Traffic profiles (ramp, step, spike, soak, phases) |
+| 2 | Step-load profiles (implemented); ramp, spike, soak, and multi-phase profiles |
 | 3 | HAR import: filtering, correlation, parameterization, validator, assertions, debug runs |
 | 4 | Run comparison and live-chart polish |
 | 5-9 | Analysis summaries, infrastructure metrics, CI baselines, distributed runs, browser tests |

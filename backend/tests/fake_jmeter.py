@@ -53,23 +53,6 @@ def main(argv):
 
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     plan = ET.parse(args["-t"]).getroot()
-    tg = plan.find(".//ThreadGroup")
-    users = int(prop(tg, "ThreadGroup.num_threads"))
-    ramp = int(prop(tg, "ThreadGroup.ramp_time") or 0)
-    duration = int(prop(tg, "ThreadGroup.duration"))
-    sampler = plan.find(".//HTTPSamplerProxy")
-    host, port = prop(sampler, "HTTPSampler.domain"), int(prop(sampler, "HTTPSampler.port"))
-    proto, path = prop(sampler, "HTTPSampler.protocol"), prop(sampler, "HTTPSampler.path")
-    method = prop(sampler, "HTTPSampler.method")
-    timeout = int(prop(sampler, "HTTPSampler.response_timeout", "30000")) / 1000
-    body = prop(sampler, "Argument.value", None)
-    headers = {}
-    for h in plan.findall(".//HeaderManager//elementProp[@elementType='Header']"):
-        headers[prop(h, "Header.name")] = prop(h, "Header.value")
-    expected = [int(e.text) for e in plan.findall(".//ResponseAssertion/collectionProp/stringProp")]
-    think = int(prop(plan, "ConstantTimer.delay", "0") or 0) / 1000
-    label = sampler.get("testname")
-
     jtl = Path(args["-l"])
     fh = jtl.open("w", newline="")
     writer = csv.writer(fh)
@@ -78,11 +61,22 @@ def main(argv):
     active = [0]
     t0 = time.time()
 
-    def worker(n):
-        time.sleep(n * ramp / users if ramp else 0)
+    def worker(group, sampler, headers, expected, start_time, number, group_users):
+        users, ramp, duration, delay = group
+        thread_start = start_time + delay + (number * ramp / users if ramp else 0)
+        time.sleep(max(0, thread_start - time.time()))
+        if stop.is_set() or thread_start >= start_time + delay + duration:
+            return
         with lock:
             active[0] += 1
-        while not stop.is_set() and time.time() < t0 + duration:
+        host, port = prop(sampler, "HTTPSampler.domain"), int(prop(sampler, "HTTPSampler.port"))
+        proto, path = prop(sampler, "HTTPSampler.protocol"), prop(sampler, "HTTPSampler.path")
+        method = prop(sampler, "HTTPSampler.method")
+        timeout = int(prop(sampler, "HTTPSampler.response_timeout", "30000")) / 1000
+        body = prop(sampler, "Argument.value", None)
+        think = int(prop(sampler, "ConstantTimer.delay", "0") or 0) / 1000
+        label = sampler.get("testname")
+        while not stop.is_set() and time.time() < start_time + delay + duration:
             start = time.time()
             code, msg, size, fail = "", "", 0, ""
             ok = False
@@ -102,8 +96,8 @@ def main(argv):
                 msg = f"Non HTTP response message: {exc}"
             elapsed = int((time.time() - start) * 1000)
             with lock:
-                writer.writerow([int(start * 1000), elapsed, label, code, msg, f"Virtual users 1-{n + 1}",
-                                 "text", str(ok).lower(), fail, size, 0, users, active[0],
+                writer.writerow([int(start * 1000), elapsed, label, code, msg, f"Virtual users 1-{number + 1}",
+                                 "text", str(ok).lower(), fail, size, 0, group_users, active[0],
                                  f"{proto}://{host}:{port}{path}", elapsed, 0, 0])
                 fh.flush()
             if think:
@@ -111,7 +105,25 @@ def main(argv):
         with lock:
             active[0] -= 1
 
-    threads = [threading.Thread(target=worker, args=(n,)) for n in range(users)]
+    threads = []
+    groups = plan.findall(".//ThreadGroup")
+    for group in groups:
+        parent_tree = next(tree for tree in plan.findall(".//hashTree") if group in list(tree))
+        group_tree = list(parent_tree)[list(parent_tree).index(group) + 1]
+        users = int(prop(group, "ThreadGroup.num_threads"))
+        ramp = int(prop(group, "ThreadGroup.ramp_time") or 0)
+        duration = int(prop(group, "ThreadGroup.duration"))
+        delay = int(prop(group, "ThreadGroup.delay") or 0)
+        sampler = group_tree.find(".//HTTPSamplerProxy")
+        headers = {
+            prop(h, "Header.name"): prop(h, "Header.value")
+            for h in group_tree.findall(".//HeaderManager//elementProp[@elementType='Header']")
+        }
+        expected = [int(e.text) for e in group_tree.findall(".//ResponseAssertion/collectionProp/stringProp")]
+        threads.extend(
+            threading.Thread(target=worker, args=((users, ramp, duration, delay), sampler, headers, expected, t0, n, users))
+            for n in range(users)
+        )
     [t.start() for t in threads]
     [t.join() for t in threads]
     fh.close()
