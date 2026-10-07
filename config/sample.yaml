@@ -1,0 +1,17 @@
+# Example test. Run it with:
+#   cd backend && python -m app.cli run ../config/sample.yaml
+# The URL points at the bundled sample app (scripts/dev.sh starts it on port 9000).
+name: Sample load test
+target_url: http://127.0.0.1:9000/slow?ms=120
+method: GET
+users: 20
+duration_seconds: 30
+ramp_up_seconds: 10
+think_time_ms: 100
+timeout_ms: 10000
+expected_status_codes: [200]
+headers:
+  Accept: application/json
+thresholds:
+  max_error_rate_percent: 1.0
+  max_p95_ms: 500

@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Load test console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --paper: #eef1f4; --surface: #fbfcfd; --ink: #16222e; --muted: #5a6b7b; --line: #d3dae1;
+    --accent: #0f6e8c; --accent-soft: #cfe6ee; --pass: #1f7a4d; --warn: #a66a00; --fail: #b3261e;
+    --pass-bg: #e1f1e8; --warn-bg: #f6ead0; --fail-bg: #f8e1df;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font: 15px/1.5 "Schibsted Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-variant-numeric: tabular-nums;
+  }
+  h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .app { display: grid; grid-template-columns: 340px 1fr; min-height: 100%; }
+  .rail { background: var(--surface); border-right: 1px solid var(--line); padding: 20px; overflow-y: auto; }
+  .main { padding: 28px 32px 48px; min-width: 0; }
+  .brand { font-size: 18px; font-weight: 700; margin-bottom: 18px; }
+  .brand small { display: block; font-weight: 400; color: var(--muted); font-size: 13px; }
+
+  form { display: grid; gap: 12px; margin-bottom: 24px; }
+  label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+  input, select, textarea {
+    background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; width: 100%;
+  }
+  textarea { resize: vertical; min-height: 64px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  details summary { cursor: pointer; font-size: 13px; color: var(--accent); margin-bottom: 8px; }
+  details > div { display: grid; gap: 12px; }
+  .btn {
+    border: 0; border-radius: 6px; padding: 9px 14px; font-weight: 600; cursor: pointer;
+    background: var(--accent); color: #fff;
+  }
+  .btn:hover { background: #0b5a73; }
+  .btn.quiet { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+  .btn.quiet:hover { background: var(--paper); }
+  .btn.danger { background: var(--fail); }
+  .btn[disabled] { opacity: .5; cursor: not-allowed; }
+  .formerror { color: var(--fail); font-size: 13px; white-space: pre-wrap; }
+
+  .runs h2 { font-size: 14px; color: var(--muted); font-weight: 600; margin-bottom: 8px; }
+  .run {
+    display: block; width: 100%; text-align: left; background: none; border: 0; cursor: pointer;
+    border-left: 3px solid transparent; padding: 8px 10px; border-radius: 0 6px 6px 0;
+  }
+  .run:hover { background: var(--paper); }
+  .run[aria-current="true"] { background: var(--accent-soft); border-left-color: var(--accent); }
+  .run .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .run .sub { font-size: 13px; color: var(--muted); }
+  .empty { color: var(--muted); font-size: 14px; }
+
+  .badge { display: inline-block; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 99px; }
+  .badge.running { background: var(--accent-soft); color: #0b5a73; }
+  .badge.completed { background: var(--pass-bg); color: var(--pass); }
+  .badge.failed { background: var(--fail-bg); color: var(--fail); }
+  .badge.stopped { background: var(--warn-bg); color: var(--warn); }
+
+  .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .head h1 { font-size: 26px; }
+  .verdict { margin: 6px 0 0; font-size: 18px; max-width: 70ch; }
+  .verdict.pass { color: var(--pass); } .verdict.fail { color: var(--fail); }
+  .url { color: var(--muted); font-size: 13px; word-break: break-all; }
+  .progress { height: 3px; background: var(--line); margin: 18px 0 0; border-radius: 2px; overflow: hidden; }
+  .progress > div { height: 100%; background: var(--accent); width: 0; transition: width .6s linear; }
+
+  .hero { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 16px 8px; margin-top: 12px; }
+  .hero h2 { font-size: 14px; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
+  .chartbox { position: relative; height: 320px; }
+  .chartbox.small { height: 200px; }
+  .nodata { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); }
+
+  .stats { display: flex; flex-wrap: wrap; margin: 22px 0 6px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .stat { flex: 1 1 130px; padding: 12px 16px 12px 0; }
+  .stat + .stat { padding-left: 16px; border-left: 1px solid var(--line); }
+  .stat .v { font-size: 24px; font-weight: 600; }
+  .stat .l { font-size: 13px; color: var(--muted); }
+
+  .section { margin-top: 26px; }
+  .section h2 { font-size: 16px; margin-bottom: 8px; }
+  .warn { padding: 10px 12px; border-radius: 6px; margin-bottom: 8px; border-left: 4px solid var(--warn); background: var(--warn-bg); }
+  .warn.critical { border-left-color: var(--fail); background: var(--fail-bg); }
+  .allclear { color: var(--pass); }
+  .codes { display: flex; flex-wrap: wrap; gap: 8px; }
+  .code { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; }
+  .links { display: flex; flex-wrap: wrap; gap: 8px; }
+  .links a, .links button { text-decoration: none; }
+  .links a.btn { display: inline-block; }
+  .notice { background: var(--warn-bg); border-left: 4px solid var(--warn); padding: 10px 12px; border-radius: 6px; margin-bottom: 16px; }
+  .welcome { max-width: 60ch; margin-top: 12vh; }
+  .welcome h1 { font-size: 30px; margin-bottom: 8px; }
+  .welcome p { color: var(--muted); }
+
+  @media (max-width: 900px) {
+    .app { grid-template-columns: 1fr; }
+    .rail { border-right: 0; border-bottom: 1px solid var(--line); }
+    .main { padding: 20px 16px 40px; }
+  }
+  @media (prefers-reduced-motion: reduce) { .progress > div { transition: none; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="rail">
+    <div class="brand">Load test console<small>Runs Apache JMeter for you</small></div>
+
+    <form id="form" autocomplete="off">
+      <label>Test name<input name="name" required maxlength="100" value="Homepage load"></label>
+      <label>Target URL<input name="target_url" type="url" required placeholder="https://api.example.com/products"></label>
+      <div class="row">
+        <label>Users<input name="users" type="number" min="1" value="10" required></label>
+        <label>Duration (seconds)<input name="duration_seconds" type="number" min="1" value="60" required></label>
+      </div>
+      <details>
+        <summary>More options</summary>
+        <div>
+          <div class="row">
+            <label>Method
+              <select name="method"><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option><option>HEAD</option></select>
+            </label>
+            <label>Ramp-up (seconds)<input name="ramp_up_seconds" type="number" min="0" value="0"></label>
+          </div>
+          <div class="row">
+            <label>Think time (ms)<input name="think_time_ms" type="number" min="0" value="0"></label>
+            <label>Timeout (ms)<input name="timeout_ms" type="number" min="100" value="30000"></label>
+          </div>
+          <label>Expected status codes<input name="expected_status_codes" value="200" placeholder="200, 201"></label>
+          <label>Headers, one per line<textarea name="headers" placeholder="Accept: application/json"></textarea></label>
+          <label>Request body<textarea name="body" placeholder='{"sku": "A-100"}'></textarea></label>
+          <div class="row">
+            <label>Fail if errors exceed (%)<input name="max_error_rate_percent" type="number" min="0" max="100" step="0.1" value="1"></label>
+            <label>Fail if p95 exceeds (ms)<input name="max_p95_ms" type="number" min="1" value="1000"></label>
+          </div>
+        </div>
+      </details>
+      <button class="btn" type="submit" id="start">Start test</button>
+      <div class="formerror" id="formerror" role="alert"></div>
+    </form>
+
+    <div class="runs">
+      <h2>Recent runs</h2>
+      <div id="runs"></div>
+    </div>
+  </aside>
+
+  <main class="main" id="main"></main>
+</div>
+
+<script>
+"use strict";
+const $ = (sel) => document.querySelector(sel);
+const state = { selected: null, runs: [], authNeeded: false, charts: {}, timer: null };
+
+// Build DOM with textContent only, so names and error text from the server cannot inject HTML.
+function h(tag, attrs = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v !== false && v != null) el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat()) if (kid != null) el.append(kid.nodeType ? kid : document.createTextNode(kid));
+  return el;
+}
+const fmt = (n, d = 0) => (n == null ? "–" : Number(n).toLocaleString(undefined, { maximumFractionDigits: d }));
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { credentials: "same-origin", ...opts,
+    headers: { "Content-Type": "application/json", ...(opts.headers || {}) } });
+  if (res.status === 401) { state.authNeeded = true; renderAuth(); throw new Error("API key required"); }
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const j = await res.json();
+      detail = Array.isArray(j.detail) ? j.detail.map(d => `${(d.loc || []).slice(1).join(".")}: ${d.msg}`).join("\n") : (j.detail || detail);
+    } catch (_) {}
+    const err = new Error(detail); err.status = res.status; throw err;
+  }
+  return res.json();
+}
+
+// ---- API key (only when the server requires one) --------------------------------------
+function renderAuth() {
+  $("#main").replaceChildren(h("div", { class: "welcome" },
+    h("h1", {}, "API key needed"),
+    h("p", {}, "This server requires an API key. Enter it to continue."),
+    h("form", { onsubmit: (e) => { e.preventDefault();
+        document.cookie = `api_key=${encodeURIComponent(e.target.key.value)}; path=/; SameSite=Strict`;
+        state.authNeeded = false; boot(); } },
+      h("label", {}, "API key", h("input", { name: "key", type: "password", required: true })),
+      h("button", { class: "btn", type: "submit" }, "Save key"))));
+}
+
+// ---- New test form ---------------------------------------------------------------------
+function parseHeaders(text) {
+  const headers = {};
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    const i = line.indexOf(":");
+    if (i < 1) throw new Error(`Header "${line}" must look like Name: value`);
+    headers[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+  return headers;
+}
+function formToConfig(f) {
+  const v = (n) => f.elements[n].value;
+  const cfg = {
+    name: v("name").trim(), target_url: v("target_url").trim(), method: v("method"),
+    users: +v("users"), duration_seconds: +v("duration_seconds"), ramp_up_seconds: +v("ramp_up_seconds"),
+    think_time_ms: +v("think_time_ms"), timeout_ms: +v("timeout_ms"),
+    expected_status_codes: v("expected_status_codes").split(",").map(s => parseInt(s, 10)).filter(Number.isInteger),
+    headers: parseHeaders(v("headers")),
+    thresholds: { max_error_rate_percent: +v("max_error_rate_percent"), max_p95_ms: v("max_p95_ms") ? +v("max_p95_ms") : null },
+  };
+  if (v("body").trim() && v("method") !== "GET") cfg.body = v("body");
+  return cfg;
+}
+$("#form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = $("#start"), err = $("#formerror");
+  err.textContent = ""; btn.disabled = true;
+  try {
+    const created = await api("/tests", { method: "POST", body: JSON.stringify(formToConfig(e.target)) });
+    state.selected = created.id;
+    await refreshRuns(); await showRun();
+  } catch (ex) { err.textContent = ex.message; }
+  finally { btn.disabled = false; }
+});
+
+// ---- Run list --------------------------------------------------------------------------
+// "completed" only means JMeter finished. Show whether the results met the limits.
+function outcome(run) {
+  if (run.status === "completed" && run.summary) {
+    if (run.summary.verdict === "pass") return { cls: "completed", label: "passed" };
+    if (run.summary.verdict === "fail") return { cls: "failed", label: "failed limits" };
+  }
+  return { cls: run.status, label: run.status };
+}
+const badge = (run) => { const o = outcome(run); return h("span", { class: `badge ${o.cls}` }, o.label); };
+
+function ago(iso) {
+  const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  return `${Math.floor(s / 86400)} d ago`;
+}
+async function refreshRuns() {
+  state.runs = await api("/tests");
+  const box = $("#runs");
+  if (!state.runs.length) { box.replaceChildren(h("p", { class: "empty" }, "No runs yet. Start your first test above.")); return; }
+  box.replaceChildren(...state.runs.map(r => h("button", {
+      class: "run", "aria-current": r.id === state.selected ? "true" : "false",
+      onclick: () => { state.selected = r.id; refreshRuns(); showRun(); } },
+    h("div", { class: "name" }, r.name),
+    h("div", { class: "sub" }, badge(r), " ", ago(r.created_at)))));
+}
+
+// ---- Run detail ------------------------------------------------------------------------
+function verdictLine(run) {
+  const m = run.summary;
+  if (run.status === "running") return null;
+  if (run.status === "failed" && run.error) return { cls: "fail", text: run.error };
+  if (!m || m.verdict === "no_data") return { cls: "fail", text: "The test produced no results." };
+  const facts = `${fmt(m.total_requests)} requests, ${fmt(m.error_rate_percent, 2)}% errors, p95 ${fmt(m.response_time_ms.p95)} ms.`;
+  if (m.verdict === "pass") return { cls: "pass", text: `Passed. ${facts}` };
+  return { cls: "fail", text: `Failed. ${facts}` };
+}
+
+const setMain = (...nodes) => $("#main").replaceChildren(...nodes.flat().filter(n => n != null && n !== false));
+
+function stat(value, label) { return h("div", { class: "stat" }, h("div", { class: "v" }, value), h("div", { class: "l" }, label)); }
+
+function drawCharts(points) {
+  const labels = points.map(p => `${p.t}s`);
+  const base = { responsive: true, maintainAspectRatio: false, animation: false,
+    interaction: { mode: "index", intersect: false }, plugins: { legend: { position: "bottom", labels: { boxWidth: 12 } } },
+    scales: { x: { grid: { display: false }, ticks: { maxTicksLimit: 12 } } } };
+
+  const mk = (id, cfg) => {
+    if (state.charts[id]) { state.charts[id].data = cfg.data; state.charts[id].update("none"); return; }
+    const el = document.getElementById(id); if (!el) return;
+    state.charts[id] = new Chart(el, cfg);
+  };
+  mk("chart-latency", { type: "line", data: { labels, datasets: [
+      { label: "Active users", data: points.map(p => p.users), yAxisID: "users", fill: true, stepped: true,
+        borderWidth: 0, backgroundColor: "rgba(15,110,140,.14)", pointRadius: 0, order: 3 },
+      { label: "p95 response time (ms)", data: points.map(p => p.p95_ms), yAxisID: "ms", borderColor: "#0f6e8c", backgroundColor: "#0f6e8c", borderWidth: 2.5, pointRadius: 0, tension: .25, order: 1 },
+      { label: "Average (ms)", data: points.map(p => p.avg_ms), yAxisID: "ms", borderColor: "#16222e", backgroundColor: "#16222e", borderWidth: 1.5, borderDash: [5, 4], pointRadius: 0, tension: .25, order: 2 } ] },
+    options: { ...base, scales: { ...base.scales,
+      ms: { position: "left", beginAtZero: true, title: { display: true, text: "Response time (ms)" } },
+      users: { position: "right", beginAtZero: true, grid: { display: false }, title: { display: true, text: "Active users" } } } } });
+  mk("chart-throughput", { type: "bar", data: { labels, datasets: [
+      { type: "line", label: "Requests per second", data: points.map(p => p.rps), yAxisID: "rps", borderColor: "#0f6e8c", backgroundColor: "#0f6e8c", borderWidth: 2, pointRadius: 0, tension: .25 },
+      { type: "bar", label: "Error rate (%)", data: points.map(p => p.error_rate_percent), yAxisID: "err", backgroundColor: "rgba(179,38,30,.55)" } ] },
+    options: { ...base, scales: { ...base.scales,
+      rps: { position: "left", beginAtZero: true, title: { display: true, text: "Requests/s" } },
+      err: { position: "right", beginAtZero: true, max: 100, grid: { display: false }, title: { display: true, text: "Errors (%)" } } } } });
+}
+
+async function showRun() {
+  clearTimeout(state.timer);
+  if (!state.selected) { renderWelcome(); return; }
+  let run;
+  try { run = await api(`/tests/${state.selected}`); } catch (e) { return; }
+  const timeline = await api(`/tests/${state.selected}/timeline?bucket_seconds=${run.config.duration_seconds <= 120 ? 2 : run.config.duration_seconds <= 900 ? 5 : 30}`).catch(() => ({ points: [] }));
+  renderRun(run, timeline.points);
+  if (run.status === "running") state.timer = setTimeout(() => { refreshRuns(); showRun(); }, 2000);
+  else refreshRuns();
+}
+
+function renderRun(run, points) {
+  const scrollY = window.scrollY;   // live runs re-render every 2s: keep the reader's place
+  const m = run.summary, c = run.config, v = verdictLine(run), id = run.id;
+  const running = run.status === "running";
+  let pct = 0;
+  if (running && run.started_at) pct = Math.min(100, ((Date.now() - Date.parse(run.started_at)) / 1000) / c.duration_seconds * 100);
+
+  const dl = (path, label) => h("a", { class: "btn quiet", href: `/reports/${id}/${path}`, target: path === "" ? "_blank" : null, rel: "noopener" }, label);
+  const headersShown = Object.keys(c.headers || {}).length;
+
+  Object.values(state.charts).forEach(ch => ch.destroy()); state.charts = {};
+
+  setMain(
+    h("div", { class: "head" },
+      h("div", {},
+        h("h1", {}, run.name, " ", badge(run)),
+        h("div", { class: "url" }, `${c.method} ${c.target_url} · ${c.users} users · ${c.duration_seconds}s${c.ramp_up_seconds ? ` with ${c.ramp_up_seconds}s ramp-up` : ""}${headersShown ? ` · ${headersShown} custom header${headersShown > 1 ? "s" : ""}` : ""}`),
+        running ? h("p", { class: "verdict" }, "Running. Results update every two seconds.") : (v && h("p", { class: `verdict ${v.cls}` }, v.text))),
+      running ? h("button", { class: "btn danger", onclick: stopRun }, "Stop test") : null),
+    running ? h("div", { class: "progress" }, h("div", { style: `width:${pct}%` })) : null,
+
+    h("div", { class: "hero" }, h("h2", {}, "Response time and load"),
+      h("div", { class: "chartbox" }, h("canvas", { id: "chart-latency" }), points.length ? null : h("div", { class: "nodata" }, running ? "Waiting for the first results…" : "No data recorded"))),
+
+    m && m.total_requests ? h("div", { class: "stats" },
+      stat(fmt(m.total_requests), "Requests"),
+      stat(`${fmt(m.error_rate_percent, 2)}%`, `Errors (${fmt(m.failed_requests)})`),
+      stat(`${fmt(m.response_time_ms.p50)} ms`, "Median"),
+      stat(`${fmt(m.response_time_ms.p95)} ms`, "p95"),
+      stat(`${fmt(m.response_time_ms.p99)} ms`, "p99"),
+      stat(fmt(m.throughput_rps, 1), "Requests per second"),
+      stat(fmt(m.peak_users), "Peak users")) : null,
+
+    m && m.total_requests ? h("div", { class: "hero" }, h("h2", {}, "Throughput and errors"),
+      h("div", { class: "chartbox small" }, h("canvas", { id: "chart-throughput" }))) : null,
+
+    m && m.total_requests ? h("div", { class: "section" }, h("h2", {}, "Findings"),
+      m.warnings.length ? m.warnings.map(w => h("div", { class: `warn ${w.severity}` }, w.message))
+        : h("p", { class: "allclear" }, running ? "No problems detected so far." : "No problems found against your limits.")) : null,
+
+    m && m.total_requests ? h("div", { class: "section" }, h("h2", {}, "Status codes"),
+      h("div", { class: "codes" }, Object.entries(m.status_codes).map(([k, n]) => h("span", { class: "code" }, `${k}: ${fmt(n)}`)))) : null,
+
+    h("div", { class: "section" }, h("h2", {}, "Downloads"),
+      h("div", { class: "links" },
+        running ? null : dl("", "JMeter HTML report"), dl("metrics.json", "Metrics (JSON)"), dl("results.csv", "Raw results (CSV)"),
+        dl("plan.jmx", "Test plan (.jmx)"), dl("jmeter.log", "JMeter log"))));
+
+  if (points.length) drawCharts(points);
+  window.scrollTo(0, scrollY);
+}
+
+async function stopRun() {
+  try { await api(`/tests/${state.selected}/stop`, { method: "POST" }); await showRun(); }
+  catch (e) { alert(e.message); }
+}
+
+function renderWelcome() {
+  $("#main").replaceChildren(h("div", { class: "welcome" },
+    h("h1", {}, "Find slow spots before your users do"),
+    h("p", {}, "Enter a URL, pick how many virtual users should call it and for how long, then start the test. Results appear here while it runs."),
+    h("p", {}, "Only test systems you own or have permission to test.")));
+}
+
+// ---- Boot ------------------------------------------------------------------------------
+async function boot() {
+  try {
+    const health = await api("/health");
+    await refreshRuns();
+    if (!state.selected && state.runs.length) state.selected = state.runs[0].id;
+    await showRun();
+    if (!state.selected) renderWelcome();
+  } catch (e) {
+    if (!state.authNeeded) $("#main").replaceChildren(h("div", { class: "notice" }, `Cannot reach the server: ${e.message}`));
+  }
+}
+boot();
+</script>
+</body>
+</html>
