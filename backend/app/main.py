@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import Settings, load_settings
 from .db import Database
-from .routers import reports, tests
+from .routers import reports, scripts, tests
 from .services.test_executor import TestExecutor
 
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
@@ -41,6 +41,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(tests.router)
     app.include_router(reports.router)
+    app.include_router(scripts.router)
     if FRONTEND_DIR.is_dir():
         app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="ui")
     return app

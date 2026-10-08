@@ -28,6 +28,7 @@ class Settings:
     max_users: int
     max_duration_seconds: int
     max_concurrent_tests: int
+    max_upload_bytes: int = 50 * 1024 * 1024
 
     @property
     def db_path(self) -> Path:
@@ -54,4 +55,5 @@ def load_settings() -> Settings:
         max_users=_int("MAX_USERS", 1000),
         max_duration_seconds=_int("MAX_DURATION_SECONDS", 3600),
         max_concurrent_tests=_int("MAX_CONCURRENT_TESTS", 2),
+        max_upload_bytes=_int("MAX_UPLOAD_MB", 50) * 1024 * 1024,
     )

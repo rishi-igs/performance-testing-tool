@@ -6,7 +6,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tests (
@@ -21,6 +21,22 @@ CREATE TABLE IF NOT EXISTS tests (
     finished_at TEXT,
     exit_code   INTEGER,
     error       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS scripts (
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    source         TEXT NOT NULL,
+    request_count  INTEGER NOT NULL,
+    items_json     TEXT NOT NULL,
+    variables_json TEXT NOT NULL,
+    warnings_json  TEXT NOT NULL,
+    rules_json     TEXT NOT NULL,
+    overrides_json TEXT NOT NULL,
+    original       BLOB,
+    created_by     TEXT,
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
 );
 """
 
@@ -87,6 +103,60 @@ class Database:
                 (now_iso(),),
             )
             return cur.rowcount
+
+    # ---- imported scripts -------------------------------------------------------------
+
+    def insert_script(self, script_id: str, *, name: str, source: str, items: list[dict[str, Any]],
+                      variables: list[str], warnings: list[str], rules: dict[str, Any],
+                      original: bytes | None, created_by: str) -> None:
+        now = now_iso()
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO scripts (id, name, source, request_count, items_json, variables_json, warnings_json, "
+                "rules_json, overrides_json, original, created_by, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?)",
+                (script_id, name, source, len(items), json.dumps(items), json.dumps(variables),
+                 json.dumps(warnings), json.dumps(rules), original, created_by, now, now),
+            )
+
+    def get_script(self, script_id: str) -> dict[str, Any] | None:
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM scripts WHERE id = ?", (script_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        for key in ("items", "variables", "warnings", "rules", "overrides"):
+            d[key] = json.loads(d.pop(f"{key}_json"))
+        return d
+
+    def list_scripts(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT id, name, source, request_count, created_by, created_at, updated_at FROM scripts "
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_script(
+        self, script_id: str,
+        mutate: Callable[[dict[str, Any], dict[str, Any]], tuple[dict[str, Any], dict[str, Any]]],
+    ) -> bool:
+        """Read rules and edits, apply `mutate`, write them back, all in one transaction."""
+        with self._conn() as c:
+            c.execute("BEGIN IMMEDIATE")
+            row = c.execute("SELECT rules_json, overrides_json FROM scripts WHERE id = ?", (script_id,)).fetchone()
+            if not row:
+                return False
+            rules, overrides = mutate(json.loads(row["rules_json"]), json.loads(row["overrides_json"]))
+            c.execute(
+                "UPDATE scripts SET rules_json = ?, overrides_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(rules), json.dumps(overrides), now_iso(), script_id),
+            )
+        return True
+
+    def delete_script(self, script_id: str) -> bool:
+        with self._conn() as c:
+            return c.execute("DELETE FROM scripts WHERE id = ?", (script_id,)).rowcount > 0
 
     @staticmethod
     def _row(row: sqlite3.Row) -> dict[str, Any]:

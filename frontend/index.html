@@ -103,6 +103,44 @@
   .welcome h1 { font-size: 30px; margin-bottom: 8px; }
   .welcome p { color: var(--muted); }
 
+  input[type="checkbox"] { width: auto; }
+  .railhead { font-size: 14px; color: var(--muted); font-weight: 600; }
+  .runs + .runs { margin-top: 22px; }
+  .badge.source { background: var(--paper); color: var(--ink); border: 1px solid var(--line); }
+
+  /* Imported script review */
+  .flow { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; padding: 0; margin: 14px 0 0; }
+  .flow li { background: var(--surface); border: 1px solid var(--line); border-radius: 99px; padding: 2px 10px; font-size: 13px; }
+  .flow li small { color: var(--muted); }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 20px 0 8px; }
+  .toolbar label { min-width: 150px; }
+  .toolbar label.check { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--ink); padding-bottom: 7px; }
+  .bulk { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; font-size: 13px; color: var(--muted); }
+  .btn.small { padding: 5px 10px; font-size: 13px; font-weight: 500; }
+  .tablewrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+  table.reqs { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .reqs th, .reqs td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  .reqs thead th { font-weight: 600; color: var(--muted); white-space: nowrap; }
+  .reqs .grouprow th { background: var(--accent-soft); }
+  .groupline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .gnum { font-weight: 600; color: #0b5a73; min-width: 2ch; }
+  .gname { font-weight: 600; max-width: 320px; }
+  .gcount { color: var(--muted); font-weight: 400; }
+  .reqs tr.excluded td { color: var(--muted); }
+  .reqs tr.excluded .path { text-decoration: line-through; text-decoration-color: var(--line); }
+  .reqs .num { text-align: right; white-space: nowrap; }
+  .urlcell { min-width: 240px; word-break: break-all; }
+  .urlcell .hostname { display: block; color: var(--muted); font-size: 12px; }
+  .fname { min-width: 150px; }
+  .src { display: block; color: var(--muted); font-size: 11px; }
+  .reason { color: var(--muted); min-width: 170px; }
+  .mono { font-family: ui-monospace, Consolas, monospace; }
+  .exportbox { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+  .exportbox label { width: 120px; }
+  .exportbox a.btn { display: inline-block; text-decoration: none; }
+  details.rules form { max-width: 720px; margin: 8px 0 0; }
+  .savestate { font-size: 13px; color: var(--muted); min-height: 1.5em; }
+
   @media (max-width: 900px) {
     .app { grid-template-columns: 1fr; }
     .rail { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -153,9 +191,21 @@
       <div class="formerror" id="formerror" role="alert"></div>
     </form>
 
+    <form id="importform" autocomplete="off" aria-labelledby="import-title">
+      <h2 class="railhead" id="import-title">Import a recording</h2>
+      <label>HAR from browser DevTools, or a JMeter .jmx
+        <input name="file" type="file" accept=".har,.jmx,.json,.xml" required></label>
+      <button class="btn quiet" type="submit" id="importbtn">Import and review</button>
+      <div class="formerror" id="importerror" role="alert"></div>
+    </form>
+
     <div class="runs">
       <h2>Recent runs</h2>
       <div id="runs"></div>
+    </div>
+    <div class="runs">
+      <h2>Imported scripts</h2>
+      <div id="scripts"></div>
     </div>
   </aside>
 
@@ -165,7 +215,9 @@
 <script>
 "use strict";
 const $ = (sel) => document.querySelector(sel);
-const state = { selected: null, runs: [], authNeeded: false, charts: {}, timer: null };
+const state = { selected: null, runs: [], authNeeded: false, charts: {}, timer: null,
+  script: null, scripts: [], scriptView: null, rulesOpen: false,
+  filters: { q: "", method: "", domain: "", showExcluded: false }, exportOpts: { users: 1, loops: 1, ramp: 0 } };
 
 // Build DOM with textContent only, so names and error text from the server cannot inject HTML.
 function h(tag, attrs = {}, ...kids) {
@@ -192,7 +244,7 @@ async function api(path, opts = {}) {
     } catch (_) {}
     const err = new Error(detail); err.status = res.status; throw err;
   }
-  return res.json();
+  return res.status === 204 ? null : res.json();
 }
 
 // ---- API key (only when the server requires one) --------------------------------------
@@ -247,7 +299,7 @@ $("#form").addEventListener("submit", async (e) => {
   err.textContent = ""; btn.disabled = true;
   try {
     const created = await api("/tests", { method: "POST", body: JSON.stringify(formToConfig(e.target)) });
-    state.selected = created.id;
+    state.selected = created.id; state.script = null;
     await refreshRuns(); await showRun();
   } catch (ex) { err.textContent = ex.message; }
   finally { btn.disabled = false; }
@@ -276,8 +328,8 @@ async function refreshRuns() {
   const box = $("#runs");
   if (!state.runs.length) { box.replaceChildren(h("p", { class: "empty" }, "No runs yet. Start your first test above.")); return; }
   box.replaceChildren(...state.runs.map(r => h("button", {
-      class: "run", "aria-current": r.id === state.selected ? "true" : "false",
-      onclick: () => { state.selected = r.id; refreshRuns(); showRun(); } },
+      class: "run", "aria-current": r.id === state.selected && !state.script ? "true" : "false",
+      onclick: () => { state.selected = r.id; state.script = null; refreshRuns(); refreshScripts(); showRun(); } },
     h("div", { class: "name" }, r.name),
     h("div", { class: "sub" }, badge(r), " ", ago(r.created_at)))));
 }
@@ -326,10 +378,12 @@ function drawCharts(points) {
 
 async function showRun() {
   clearTimeout(state.timer);
+  if (state.script) return;          // an imported script is open instead
   if (!state.selected) { renderWelcome(); return; }
   let run;
   try { run = await api(`/tests/${state.selected}`); } catch (e) { return; }
   const timeline = await api(`/tests/${state.selected}/timeline?bucket_seconds=${run.config.duration_seconds <= 120 ? 2 : run.config.duration_seconds <= 900 ? 5 : 30}`).catch(() => ({ points: [] }));
+  if (state.script) return;          // the user opened a script while this loaded
   renderRun(run, timeline.points);
   if (run.status === "running") state.timer = setTimeout(() => { refreshRuns(); showRun(); }, 2000);
   else refreshRuns();
@@ -396,7 +450,219 @@ function renderWelcome() {
   $("#main").replaceChildren(h("div", { class: "welcome" },
     h("h1", {}, "Find slow spots before your users do"),
     h("p", {}, "Enter a URL, pick how many virtual users should call it and for how long, then start the test. Results appear here while it runs."),
+    h("p", {}, "To test a whole user flow, import a HAR recording or a JMeter .jmx: unwanted requests are filtered out and the rest are grouped by business function."),
     h("p", {}, "Only test systems you own or have permission to test.")));
+}
+
+// ---- Imported scripts (HAR / JMX): review, filter, group, export ----------------------
+$("#importform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const file = e.target.elements.file.files[0], btn = $("#importbtn"), err = $("#importerror");
+  err.textContent = "";
+  if (!file) return;
+  const jmx = /\.jmx$/i.test(file.name);
+  btn.disabled = true; btn.textContent = "Importing…";
+  try {
+    const name = file.name.replace(/\.(har|jmx|json|xml)$/i, "").slice(0, 100);
+    const created = await api(`/scripts/import-${jmx ? "jmx" : "har"}?name=${encodeURIComponent(name)}`,
+      { method: "POST", body: file, headers: { "Content-Type": jmx ? "application/xml" : "application/json" } });
+    e.target.reset();
+    await openScript(created.id, created);
+  } catch (ex) { err.textContent = ex.message; }
+  finally { btn.disabled = false; btn.textContent = "Import and review"; }
+});
+
+async function refreshScripts() {
+  state.scripts = await api("/scripts");
+  const box = $("#scripts");
+  if (!state.scripts.length) { box.replaceChildren(h("p", { class: "empty" }, "No imports yet.")); return; }
+  box.replaceChildren(...state.scripts.map(s => h("button", {
+      class: "run", "aria-current": s.id === state.script ? "true" : "false", onclick: () => openScript(s.id) },
+    h("div", { class: "name" }, s.name),
+    h("div", { class: "sub" }, h("span", { class: "badge source" }, s.source.toUpperCase()),
+      ` ${fmt(s.request_count)} requests · ${ago(s.created_at)}`))));
+}
+
+async function openScript(id, data) {
+  clearTimeout(state.timer);
+  if (state.script !== id) {
+    state.filters = { q: "", method: "", domain: "", showExcluded: false };
+    state.exportOpts = { users: 1, loops: 1, ramp: 0 };
+  }
+  state.script = id;
+  try { state.scriptView = data || await api(`/scripts/${id}`); }
+  catch (e) { setMain(h("div", { class: "notice" }, e.message)); return; }
+  refreshRuns(); refreshScripts();
+  renderScript();
+}
+
+async function saveScript(body) {
+  const focusKey = document.activeElement && document.activeElement.dataset.key;
+  const status = $("#savestate");
+  if (status) status.textContent = "Saving…";
+  try {
+    state.scriptView = await api(`/scripts/${state.script}/filter`, { method: "PUT", body: JSON.stringify(body) });
+    renderScript(focusKey);
+    $("#savestate").textContent = "Saved";
+  } catch (e) {
+    if (status) { status.textContent = ""; }
+    const err = $("#scripterror"); if (err) err.textContent = `Not saved: ${e.message}`;
+  }
+}
+
+async function deleteScript() {
+  if (!confirm(`Delete the import "${state.scriptView.name}"? This cannot be undone.`)) return;
+  try { await api(`/scripts/${state.script}`, { method: "DELETE" }); }
+  catch (e) { $("#scripterror").textContent = e.message; return; }
+  state.script = null; state.scriptView = null;
+  await refreshScripts(); await refreshRuns();
+  if (state.selected) showRun(); else renderWelcome();
+}
+
+const fmtBytes = (n) => n < 1024 ? `${fmt(n)} B` : n < 1048576 ? `${fmt(n / 1024, 1)} KB` : `${fmt(n / 1048576, 1)} MB`;
+const listOf = (text) => text.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+function urlParts(u) {
+  try { const x = new URL(u); return { host: x.host, path: x.pathname + x.search }; }
+  catch (_) { return { host: "", path: u }; }
+}
+function parseRules(text) {
+  return text.split("\n").map(l => l.trim()).filter(Boolean).map((line, i) => {
+    const at = line.indexOf("=");
+    if (at < 1 || !line.slice(at + 1).trim()) throw new Error(`Rule line ${i + 1} must look like Name = URL pattern`);
+    return { name: line.slice(0, at).trim(), url_pattern: line.slice(at + 1).trim() };
+  });
+}
+function exportHref() {
+  const o = state.exportOpts;
+  return `/scripts/${state.script}/export-jmx?users=${o.users}&loops=${o.loops}&ramp_up_seconds=${o.ramp}`;
+}
+
+function scriptRow(it) {
+  const why = !it.include ? (it.include_source === "manual" ? "Excluded by you" : it.auto_reason)
+    : (it.include_source === "manual" && it.auto_reason ? `Kept by you (rule: ${it.auto_reason})` : null);
+  const where = it.url ? urlParts(it.url) : null;
+  return h("tr", { class: it.include ? null : "excluded" },
+    h("td", {}, h("input", { type: "checkbox", checked: it.include, "data-key": `i-${it.index}`,
+      "aria-label": `Keep ${it.label}`, onchange: (e) => saveScript({ changes: [{ index: it.index, include: e.target.checked }] }) })),
+    h("td", { class: "mono" }, it.method || "–"),
+    h("td", { class: "urlcell" }, where ? [h("span", { class: "path" }, where.path), h("span", { class: "hostname" }, where.host)] : it.label),
+    h("td", {}, it.status == null ? "–" : String(it.status)),
+    h("td", {}, it.resource_type || (it.mime ? it.mime.split("/").pop() : it.kind === "other" ? "JMeter" : "–")),
+    h("td", { class: "num" }, it.size == null ? "–" : fmtBytes(it.size)),
+    h("td", { class: "num" }, it.time_ms == null ? "–" : `${fmt(it.time_ms)} ms`),
+    h("td", {}, h("input", { class: "fname", value: it.transaction, list: "fnames", maxlength: 80, "data-key": `t-${it.index}`,
+        "aria-label": `Business function for ${it.label}`,
+        onchange: (e) => saveScript({ changes: [{ index: it.index, transaction: e.target.value.trim() || null }] }) }),
+      it.transaction_source === "auto" ? null : h("small", { class: "src" }, it.transaction_source === "rule" ? "from a rule" : "edited")),
+    h("td", { class: "reason" }, why || it.note || ""));
+}
+
+function groupRow(chunk) {
+  const first = chunk[0], kept = chunk.filter(i => i.include).length;
+  return h("tr", { class: "grouprow" }, h("th", { colspan: 9, scope: "colgroup" },
+    h("div", { class: "groupline" },
+      h("span", { class: "gnum" }, first.transaction_number ? String(first.transaction_number).padStart(2, "0") : "–"),
+      h("input", { class: "gname", value: first.transaction, maxlength: 80, "data-key": `g-${first.index}`,
+        "aria-label": `Rename business function ${first.transaction}`,
+        onchange: (e) => { const v = e.target.value.trim();
+          if (v) saveScript({ changes: chunk.map(i => ({ index: i.index, transaction: v })) }); } }),
+      h("span", { class: "gcount" }, `${kept} kept${chunk.length > kept ? `, ${chunk.length - kept} excluded` : ""}`))));
+}
+
+function renderScript(focusKey) {
+  const s = state.scriptView, f = state.filters, sum = s.summary;
+  const scrollY = window.scrollY;
+  Object.values(state.charts).forEach(ch => ch.destroy()); state.charts = {};
+
+  const q = f.q.toLowerCase();
+  const visible = s.items.filter(i => (f.showExcluded || i.include)
+    && (!f.method || i.method === f.method) && (!f.domain || i.host === f.domain)
+    && (!q || `${i.label} ${i.url || ""} ${i.transaction}`.toLowerCase().includes(q)));
+  const chunks = [];
+  for (const it of visible) {
+    const last = chunks[chunks.length - 1];
+    if (last && last[0].transaction === it.transaction) last.push(it); else chunks.push([it]);
+  }
+  const options = (values, current) => [h("option", { value: "" }, "All"),
+    ...values.map(v => h("option", { value: v, selected: v === current }, v))];
+  const hosts = [...new Set(s.items.map(i => i.host).filter(Boolean))].sort();
+  const methods = [...new Set(s.items.map(i => i.method).filter(Boolean))].sort();
+  const o = state.exportOpts;
+  const exportInput = (label, key, max) => h("label", {}, label, h("input", { type: "number", min: key === "ramp" ? 0 : 1, max,
+    value: o[key], oninput: (e) => { o[key] = Math.max(+e.target.min, parseInt(e.target.value, 10) || 0);
+      const a = $("#exportlink"); if (a) a.href = exportHref(); } }));
+
+  setMain(
+    h("div", { class: "head" },
+      h("div", {},
+        h("h1", {}, s.name, " ", h("span", { class: "badge source" }, s.source.toUpperCase())),
+        h("p", { class: "verdict" }, `${fmt(sum.captured)} captured, ${fmt(sum.kept)} kept, ${fmt(sum.excluded)} excluded · `
+          + `${sum.transactions} business function${sum.transactions === 1 ? "" : "s"}`))),
+    s.transactions.length ? h("ol", { class: "flow", "aria-label": "Business functions in run order" },
+      s.transactions.map(t => h("li", {}, `${String(t.number).padStart(2, "0")} ${t.name} `, h("small", {}, `(${t.requests})`)))) : null,
+
+    s.warnings.length ? h("div", { class: "section" }, s.warnings.map(w => h("div", { class: "warn" }, w))) : null,
+
+    h("div", { class: "section" }, h("h2", {}, "Export"),
+      h("div", { class: "exportbox" },
+        s.source === "har" ? [exportInput("Users", "users"), exportInput("Loops", "loops", 100000), exportInput("Ramp-up (s)", "ramp", 3600)]
+          : h("p", { class: "empty" }, "Thread groups keep the settings from your imported plan."),
+        sum.kept ? h("a", { class: "btn", id: "exportlink", href: exportHref() }, "Download .jmx")
+          : h("button", { class: "btn", disabled: true }, "Download .jmx (nothing kept)"),
+        h("button", { class: "btn quiet", onclick: deleteScript }, "Delete import"))),
+
+    h("div", { class: "toolbar" },
+      h("label", {}, "Search", h("input", { type: "search", value: f.q, "data-key": "f-q", placeholder: "URL or function",
+        oninput: (e) => { f.q = e.target.value; renderScript("f-q"); } })),
+      h("label", {}, "Method", h("select", { "data-key": "f-m", onchange: (e) => { f.method = e.target.value; renderScript("f-m"); } }, options(methods, f.method))),
+      h("label", {}, "Domain", h("select", { "data-key": "f-d", onchange: (e) => { f.domain = e.target.value; renderScript("f-d"); } }, options(hosts, f.domain))),
+      h("label", { class: "check" }, h("input", { type: "checkbox", checked: f.showExcluded, "data-key": "f-x",
+        onchange: (e) => { f.showExcluded = e.target.checked; renderScript("f-x"); } }), `Show excluded (${fmt(sum.excluded)})`)),
+
+    h("div", { class: "bulk" },
+      h("span", {}, `${fmt(visible.length)} shown:`),
+      h("button", { class: "btn quiet small", onclick: () => saveScript({ changes: visible.map(i => ({ index: i.index, include: true })) }) }, "Keep all shown"),
+      h("button", { class: "btn quiet small", onclick: () => saveScript({ changes: visible.map(i => ({ index: i.index, include: false })) }) }, "Exclude all shown"),
+      h("button", { class: "btn quiet small", onclick: () => saveScript({ changes: visible.map(i => ({ index: i.index, include: null, transaction: null })) }) }, "Reset shown to automatic"),
+      h("button", { class: "btn quiet small", "aria-pressed": String(s.rules.keep_only_api),
+        onclick: () => saveScript({ rules: { ...s.rules, keep_only_api: !s.rules.keep_only_api } }) }, "Keep API calls only"),
+      h("span", { class: "savestate", id: "savestate", role: "status" })),
+    h("div", { class: "formerror", id: "scripterror", role: "alert" }),
+
+    h("div", { class: "tablewrap" }, h("table", { class: "reqs" },
+      h("thead", {}, h("tr", {}, ["Keep", "Method", "Request", "Status", "Type", "Size", "Time", "Business function", "Why"]
+        .map(t => h("th", { scope: "col" }, t)))),
+      h("tbody", {}, visible.length ? chunks.flatMap(c => [groupRow(c), ...c.map(scriptRow)])
+        : h("tr", {}, h("td", { colspan: 9, class: "empty" }, "No requests match these filters."))))),
+    h("datalist", { id: "fnames" }, [...new Set(s.items.map(i => i.transaction))].map(n => h("option", { value: n }))),
+
+    h("details", { class: "rules section", open: state.rulesOpen, ontoggle: (e) => { state.rulesOpen = e.target.open; } },
+      h("summary", {}, "Filter and grouping rules"),
+      h("form", { onsubmit: (e) => { e.preventDefault(); const el = e.target.elements;
+          let rules;
+          try { rules = parseRules(el.tx.value); } catch (ex) { $("#ruleserror").textContent = ex.message; return; }
+          saveScript({ rules: { ...s.rules, transaction_rules: rules, idle_gap_seconds: +el.gap.value,
+            exclude_extensions: listOf(el.ext.value), exclude_mime_types: listOf(el.mime.value),
+            exclude_domains: listOf(el.domains.value), exclude_methods: listOf(el.methods.value) } }); } },
+        h("label", {}, "Business-function rules, one per line: Name = URL pattern",
+          h("textarea", { name: "tx", rows: 4, placeholder: "Login = */auth/*\nSearch = */api/search*" },
+            s.rules.transaction_rules.map(r => `${r.name} = ${r.url_pattern}`).join("\n"))),
+        h("small", {}, "* matches anything. The first matching rule wins over automatic grouping; your own edits win over rules."),
+        h("label", {}, "Start a new business function after this many idle seconds (0 turns it off)",
+          h("input", { name: "gap", type: "number", min: 0, max: 600, step: 0.5, value: s.rules.idle_gap_seconds })),
+        h("label", {}, "Exclude file extensions", h("textarea", { name: "ext", rows: 2 }, s.rules.exclude_extensions.join(", "))),
+        h("label", {}, "Exclude response content types", h("textarea", { name: "mime", rows: 2 }, s.rules.exclude_mime_types.join(", "))),
+        h("label", {}, "Exclude domains (analytics, ads, chat widgets)", h("textarea", { name: "domains", rows: 5 }, s.rules.exclude_domains.join("\n"))),
+        h("label", {}, "Exclude methods", h("input", { name: "methods", value: s.rules.exclude_methods.join(", ") })),
+        h("button", { class: "btn", type: "submit" }, "Apply rules"),
+        h("div", { class: "formerror", id: "ruleserror", role: "alert" }))));
+
+  window.scrollTo(0, scrollY);
+  const target = focusKey && document.querySelector(`[data-key="${focusKey}"]`);
+  if (target) {
+    target.focus({ preventScroll: true });
+    if (target.type === "search") target.setSelectionRange(target.value.length, target.value.length);
+  }
 }
 
 // ---- Boot ------------------------------------------------------------------------------
@@ -404,6 +670,7 @@ async function boot() {
   try {
     const health = await api("/health");
     await refreshRuns();
+    await refreshScripts();
     if (!state.selected && state.runs.length) state.selected = state.runs[0].id;
     await showRun();
     if (!state.selected) renderWelcome();
