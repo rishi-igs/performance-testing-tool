@@ -1,12 +1,15 @@
 """Download results, exports and the JMeter HTML report for a test."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from ..deps import require_api_key
+from ..services import report, report_docx, report_pdf, result_analyzer
+from ..services.monitoring import monitor_series
 from ..services.test_executor import run_paths
 from .tests import get_test_or_404, live_summary
 
@@ -40,6 +43,41 @@ def report_asset(test_id: str, asset: str, request: Request, _: str = Depends(re
     if not target.is_file():
         raise HTTPException(404, "Not found")
     return FileResponse(target)
+
+
+def _report(request: Request, test_id: str) -> dict:
+    test = get_test_or_404(request, test_id)
+    test["summary"] = live_summary(request, test)
+    paths = run_paths(request.app.state.settings, test_id)
+    return report.report_data(test, result_analyzer.parse_jtl(paths["jtl"]), monitor_series(paths["dir"]))
+
+
+def _filename(data: dict, ext: str) -> str:
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", data["title"]).strip("-.")[:50] or "report"
+    return f'attachment; filename="{name}-{data["id"]}.{ext}"'
+
+
+@router.get("/{test_id}/summary.html")
+def summary_html(test_id: str, request: Request, download: bool = False, _: str = Depends(require_api_key)):
+    """A self-contained report (inline charts); print it to save a PDF."""
+    data = _report(request, test_id)
+    headers = {"Content-Disposition": _filename(data, "html")} if download else {}
+    return HTMLResponse(report.render_html(data), headers=headers)
+
+
+@router.get("/{test_id}/summary.pdf")
+def summary_pdf(test_id: str, request: Request, _: str = Depends(require_api_key)):
+    data = _report(request, test_id)
+    return Response(report_pdf.render_pdf(data), media_type="application/pdf",
+                    headers={"Content-Disposition": _filename(data, "pdf")})
+
+
+@router.get("/{test_id}/summary.docx")
+def summary_docx(test_id: str, request: Request, _: str = Depends(require_api_key)):
+    data = _report(request, test_id)
+    return Response(report_docx.render_docx(data),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    headers={"Content-Disposition": _filename(data, "docx")})
 
 
 @router.get("/{test_id}/metrics.json")

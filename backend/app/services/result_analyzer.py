@@ -22,6 +22,13 @@ class Sample:
     success: bool
     failure: str
     users: int
+    label: str = ""
+    thread: str = ""
+    group_users: int = 0
+    bytes: int = 0
+    sent_bytes: int = 0
+    connect: int = 0
+    transaction: bool = False   # a Transaction Controller's own row (one business function)
 
 
 def parse_jtl(path: Path) -> list[Sample]:
@@ -35,15 +42,23 @@ def parse_jtl(path: Path) -> list[Sample]:
             if (row.get("success") or "").lower() not in ("true", "false"):
                 continue
             try:
+                message = row.get("responseMessage") or ""
                 samples.append(Sample(
                     ts=int(row["timeStamp"]),
                     elapsed=int(row["elapsed"]),
                     latency=int(row.get("Latency") or row["elapsed"]),
                     code=row.get("responseCode") or "",
-                    message=row.get("responseMessage") or "",
+                    message=message,
                     success=(row.get("success") or "").lower() == "true",
                     failure=row.get("failureMessage") or "",
                     users=int(row.get("allThreads") or 0),
+                    label=row.get("label") or "",
+                    thread=row.get("threadName") or "",
+                    group_users=int(row.get("grpThreads") or 0),
+                    bytes=int(row.get("bytes") or 0),
+                    sent_bytes=int(row.get("sentBytes") or 0),
+                    connect=int(row.get("Connect") or 0),
+                    transaction=message.startswith("Number of samples in transaction"),
                 ))
             except (KeyError, ValueError, TypeError):
                 continue
