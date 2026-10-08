@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
 from typing import Any, Iterable
 from urllib.parse import SplitResult, urlsplit
 
@@ -102,6 +103,8 @@ def add_transaction_controller(parent_tree: ET.Element, name: str) -> ET.Element
     """Append a Transaction Controller (one business function); return its child hashTree."""
     tc, tc_tree = _element(parent_tree, "TransactionController", "TransactionControllerGui", "TransactionController", name)
     _prop(tc, "boolProp", "TransactionController.parent", False)
+    # Without this property JMeter counts timer waits (pacing, goal throttling) as response time.
+    _prop(tc, "boolProp", "TransactionController.includeTimers", False)
     return tc_tree
 
 
@@ -140,7 +143,8 @@ def _add_thread_group(
     )
     if config.headers:
         _add_header_manager(sampler_tree, config.headers.items())
-    _add_status_assertion(sampler_tree, config.expected_status_codes, ignore_status=False)
+    # "Ignore status" so an expected 4xx (e.g. 404) passes; any code not listed still fails.
+    _add_status_assertion(sampler_tree, config.expected_status_codes, ignore_status=True)
 
     if config.think_time_ms:
         timer, _ = _element(sampler_tree, "ConstantTimer", "ConstantTimerGui", "ConstantTimer", "Think time")
@@ -150,7 +154,7 @@ def _add_thread_group(
 def build_plan(config: LoadTestConfig) -> str:
     url = urlsplit(config.target_url)
     port = url.port or (443 if url.scheme == "https" else 80)
-    root, plan_tree = _test_plan(config.name)
+    root, _, plan_tree = _test_plan(config.name)
 
     sampler_name = f"{config.method} {(url.path or '/') + (f'?{url.query}' if url.query else '')}"
     if config.profile is None:
@@ -185,8 +189,11 @@ def build_plan(config: LoadTestConfig) -> str:
     return serialize(root)
 
 
-def _test_plan(name: str, variables: Iterable[str] = ()) -> tuple[ET.Element, ET.Element]:
-    """Root element and Test Plan; `variables` become empty User Defined Variables. Returns (root, plan hashTree)."""
+def _test_plan(name: str, variables: Iterable[str] = ()) -> tuple[ET.Element, ET.Element, ET.Element]:
+    """Root element and Test Plan; `variables` become empty User Defined Variables.
+
+    Returns (root, Test Plan element, its hashTree).
+    """
     root = ET.Element("jmeterTestPlan", {"version": "1.2", "properties": "5.0", "jmeter": JMETER_VERSION})
     top = ET.SubElement(root, "hashTree")
     plan, plan_tree = _element(top, "TestPlan", "TestPlanGui", "TestPlan", name)
@@ -200,11 +207,28 @@ def _test_plan(name: str, variables: Iterable[str] = ()) -> tuple[ET.Element, ET
     })
     coll = ET.SubElement(args, "collectionProp", {"name": "Arguments.arguments"})
     for var in variables:
-        arg = ET.SubElement(coll, "elementProp", {"name": var, "elementType": "Argument"})
-        _prop(arg, "stringProp", "Argument.name", var)
-        _prop(arg, "stringProp", "Argument.value", "")
-        _prop(arg, "stringProp", "Argument.metadata", "=")
-    return root, plan_tree
+        add_variable(plan, var, "")
+    return root, plan, plan_tree
+
+
+def add_variable(plan: ET.Element, name: str, value: str) -> None:
+    """Add (or overwrite) a User Defined Variable on the Test Plan."""
+    coll = plan.find("elementProp[@name='TestPlan.user_defined_variables']/collectionProp")
+    if coll is None:
+        args = ET.SubElement(plan, "elementProp", {
+            "name": "TestPlan.user_defined_variables", "elementType": "Arguments",
+            "guiclass": "ArgumentsPanel", "testclass": "Arguments",
+            "testname": "User Defined Variables", "enabled": "true",
+        })
+        coll = ET.SubElement(args, "collectionProp", {"name": "Arguments.arguments"})
+    for existing in coll.findall("elementProp"):
+        if existing.get("name") == name:
+            existing.find("stringProp[@name='Argument.value']").text = value
+            return
+    arg = ET.SubElement(coll, "elementProp", {"name": name, "elementType": "Argument"})
+    _prop(arg, "stringProp", "Argument.name", name)
+    _prop(arg, "stringProp", "Argument.value", value)
+    _prop(arg, "stringProp", "Argument.metadata", "=")
 
 
 def serialize(root: ET.Element) -> str:
@@ -244,6 +268,20 @@ _VIEW_RESULTS_FIELDS = [
 ]
 
 
+@dataclass
+class PlanTree:
+    """A plan being built, with handles to the parts a script's design changes."""
+
+    root: ET.Element
+    plan: ET.Element
+    plan_tree: ET.Element
+    thread_groups: list[tuple[ET.Element, ET.Element]] = field(default_factory=list)
+    # item index -> (sampler, its hashTree, the hashTree holding the sampler)
+    samplers: dict[int, tuple[ET.Element, ET.Element, ET.Element]] = field(default_factory=dict)
+    pauses_ms: list[float | None] = field(default_factory=list)   # recorded pause before each transaction
+    cookie_manager: ET.Element | None = None
+
+
 def build_recorded_plan(
     name: str,
     transactions: list[tuple[str, list[dict[str, Any]]]],
@@ -254,6 +292,35 @@ def build_recorded_plan(
     loops: int = 1,
     timeout_ms: int = 30_000,
 ) -> str:
+    return serialize(recorded_tree(name, transactions, variables=variables, users=users,
+                                   ramp_up_seconds=ramp_up_seconds, loops=loops, timeout_ms=timeout_ms).root)
+
+
+def _recorded_pauses(transactions: list[tuple[str, list[dict[str, Any]]]]) -> list[float | None]:
+    """Recorded idle time between the end of one transaction and the start of the next."""
+    pauses: list[float | None] = []
+    previous_end = None
+    for _, requests in transactions:
+        timed = [r for r in requests if r.get("started_ms") is not None]
+        start = min((r["started_ms"] for r in timed), default=None)
+        pauses.append(max(0.0, start - previous_end) if start is not None and previous_end is not None else None)
+        if timed:
+            previous_end = max(r["started_ms"] + (r.get("time_ms") or 0) for r in timed)
+    return pauses
+
+
+def recorded_tree(
+    name: str,
+    transactions: list[tuple[str, list[dict[str, Any]]]],
+    *,
+    variables: Iterable[str] = (),
+    users: int = 1,
+    ramp_up_seconds: int = 0,
+    loops: int = 1,
+    timeout_ms: int = 30_000,
+    clear_cookies: bool = True,
+    status_checks: bool = True,
+) -> PlanTree:
     """Plan for an imported recording: one Transaction Controller per business function.
 
     Test Plan
@@ -265,7 +332,8 @@ def build_recorded_plan(
             Response Assertion: recorded status code                          (assertion)
       View Results Tree, disabled so it costs nothing under load              (listener)
     """
-    root, plan_tree = _test_plan(name, variables)
+    root, plan, plan_tree = _test_plan(name, variables)
+    tree = PlanTree(root=root, plan=plan, plan_tree=plan_tree, pauses_ms=_recorded_pauses(transactions))
 
     defaults, _ = _element(plan_tree, "ConfigTestElement", "HttpDefaultsGui", "ConfigTestElement", "HTTP Request Defaults")
     dargs = ET.SubElement(defaults, "elementProp", {
@@ -278,7 +346,8 @@ def build_recorded_plan(
 
     cookies, _ = _element(plan_tree, "CookieManager", "CookiePanel", "CookieManager", "HTTP Cookie Manager")
     ET.SubElement(cookies, "collectionProp", {"name": "CookieManager.cookies"})
-    _prop(cookies, "boolProp", "CookieManager.clearEachIteration", True)   # each iteration is a new visitor
+    _prop(cookies, "boolProp", "CookieManager.clearEachIteration", clear_cookies)   # True: each iteration is a new visitor
+    tree.cookie_manager = cookies
 
     common = _common_headers([r for _, requests in transactions for r in requests])
     if common:
@@ -299,7 +368,8 @@ def build_recorded_plan(
     _prop(tg, "boolProp", "ThreadGroup.scheduler", False)
     _prop(tg, "stringProp", "ThreadGroup.duration", "")
     _prop(tg, "stringProp", "ThreadGroup.delay", "")
-    _prop(tg, "boolProp", "ThreadGroup.same_user_on_next_iteration", True)
+    _prop(tg, "boolProp", "ThreadGroup.same_user_on_next_iteration", not clear_cookies)
+    tree.thread_groups.append((tg, tg_tree))
 
     for number, (tx_name, requests) in enumerate(transactions, 1):
         tc_tree = add_transaction_controller(tg_tree, f"{number:02d} {tx_name}")
@@ -310,10 +380,11 @@ def build_recorded_plan(
                 body=r["body"], follow_redirects=False,
                 content_encoding="UTF-8" if r["body"] is not None else None,
             )
+            tree.samplers[r["index"]] = (tc_tree[-2], sampler_tree, tc_tree)
             own = [(n, v) for n, v in r["headers"] if (n.lower(), v) not in common_keys]
             if own:
                 _add_header_manager(sampler_tree, own)
-            if r.get("status"):
+            if r.get("status") and status_checks:
                 _add_status_assertion(sampler_tree, [r["status"]], ignore_status=True)
 
     vrt, _ = _element(plan_tree, "ResultCollector", "ViewResultsFullVisualizer", "ResultCollector", "View Results Tree")
@@ -322,11 +393,10 @@ def build_recorded_plan(
     obj = ET.SubElement(vrt, "objProp")
     ET.SubElement(obj, "name").text = "saveConfig"
     value = ET.SubElement(obj, "value", {"class": "SampleSaveConfiguration"})
-    for field, flag in _VIEW_RESULTS_FIELDS:
-        ET.SubElement(value, field).text = flag
+    for save_field, flag in _VIEW_RESULTS_FIELDS:
+        ET.SubElement(value, save_field).text = flag
     _prop(vrt, "stringProp", "filename", "")
-
-    return serialize(root)
+    return tree
 
 
 def jmeter_properties() -> list[str]:

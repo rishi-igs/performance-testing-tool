@@ -1,11 +1,15 @@
 """Parse a browser HAR recording into a sanitized list of requests.
 
-Only what is needed to rebuild the requests is kept. Response bodies are dropped, cookies
-are removed (JMeter's Cookie Manager handles them during a run) and credential headers are
-replaced with JMeter variables, so recorded secrets are not stored.
+Only what is needed to rebuild the requests is kept. Response bodies are read during import
+to find where dynamic values come from (correlation) and to suggest checks, then dropped.
+Cookies are removed (JMeter's Cookie Manager handles them during a run) and credential
+headers that no response issued are replaced with JMeter variables, so recorded secrets are
+not stored.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import re
 from datetime import datetime
@@ -13,9 +17,11 @@ from typing import Any
 from urllib.parse import urlencode, urlsplit
 
 from ..models.test_config import SENSITIVE_HEADERS
+from . import correlation
 
 MAX_REQUESTS = 10_000
 MAX_BODY_CHARS = 1_000_000
+_TEXT_MIME = re.compile(r"json|xml|html|text/plain|x-www-form-urlencoded", re.IGNORECASE)
 
 # Set by the browser or by JMeter itself; replaying the recorded value would be wrong.
 # Host, If-Modified-Since and If-None-Match match JMeter's recorder default (proxy.headers.remove).
@@ -44,7 +50,7 @@ def _number(value: Any) -> float | None:
     return float(value) if isinstance(value, (int, float)) and value >= 0 else None
 
 
-def _clean_headers(raw: Any, secrets: set[str], dropped: set[str]) -> list[list[str]]:
+def _clean_headers(raw: Any, dropped: set[str]) -> list[list[str]]:
     headers: list[list[str]] = []
     for h in raw if isinstance(raw, list) else []:
         if not isinstance(h, dict):
@@ -58,13 +64,38 @@ def _clean_headers(raw: Any, secrets: set[str], dropped: set[str]) -> list[list[
             continue
         if any(c in name for c in "\r\n:") or any(c in value for c in "\r\n"):
             continue
-        if low in SECRET_HEADERS:
-            var = low.replace("-", "_")
-            scheme = _AUTH_SCHEME.match(value)
-            value = f"{scheme.group(0) if scheme else ''}${{{var}}}"
-            secrets.add(var)
         headers.append([name, value])
     return headers
+
+
+def _hide_secrets(items: list[dict[str, Any]]) -> set[str]:
+    """Credential headers still holding a recorded value get a ${variable} instead."""
+    secrets: set[str] = set()
+    for item in items:
+        for header in item["headers"]:
+            low = header[0].lower()
+            if low in SECRET_HEADERS and "${" not in header[1]:
+                var = low.replace("-", "_")
+                scheme = _AUTH_SCHEME.match(header[1])
+                header[1] = f"{scheme.group(0) if scheme else ''}${{{var}}}"
+                secrets.add(var)
+    return secrets
+
+
+def _response(resp: dict[str, Any], mime: str) -> dict[str, Any]:
+    """What correlation needs from a response: text body (if textual), mime and headers."""
+    content = resp.get("content") if isinstance(resp.get("content"), dict) else {}
+    text = content.get("text") if isinstance(content.get("text"), str) else None
+    if text is not None and content.get("encoding") == "base64":
+        try:
+            text = base64.b64decode(text, validate=False).decode("utf-8", errors="replace") if _TEXT_MIME.search(mime) else None
+        except (binascii.Error, ValueError):
+            text = None
+    if text is not None and not _TEXT_MIME.search(mime) and not text.lstrip()[:1] in ("{", "[", "<"):
+        text = None
+    headers = [[str(h.get("name", "")), str(h.get("value", ""))]
+               for h in resp.get("headers") or [] if isinstance(h, dict)]
+    return {"body": text[:correlation.MAX_SEARCH_CHARS] if text else None, "mime": mime, "headers": headers}
 
 
 def _body(post: Any) -> tuple[str | None, str | None]:
@@ -104,10 +135,10 @@ def parse_har(raw: bytes) -> dict[str, Any]:
         p["id"]: _page_name(p.get("title"))
         for p in (log.get("pages") or []) if isinstance(p, dict) and isinstance(p.get("id"), str)
     }
-    secrets: set[str] = set()
     dropped: set[str] = set()
     truncated = multipart = 0
     items: list[dict[str, Any]] = []
+    responses: list[dict[str, Any]] = []
 
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("request"), dict):
@@ -116,7 +147,7 @@ def parse_har(raw: bytes) -> dict[str, Any]:
         resp = entry.get("response") if isinstance(entry.get("response"), dict) else {}
         url = str(req.get("url") or "")
         method = str(req.get("method") or "GET").upper()
-        headers = _clean_headers(req.get("headers"), secrets, dropped)
+        headers = _clean_headers(req.get("headers"), dropped)
         body, body_mime = _body(req.get("postData"))
         if body is not None and len(body) > MAX_BODY_CHARS:
             body, truncated = None, truncated + 1
@@ -132,6 +163,8 @@ def parse_har(raw: bytes) -> dict[str, Any]:
         if size is None:
             size = _number(resp.get("bodySize"))
         page = entry.get("pageref") if isinstance(entry.get("pageref"), str) else None
+        mime = (content.get("mimeType") or "").split(";")[0].strip().lower() if isinstance(content.get("mimeType"), str) else ""
+        responses.append(_response(resp, mime))
 
         items.append({
             "kind": "http",
@@ -140,7 +173,7 @@ def parse_har(raw: bytes) -> dict[str, Any]:
             "url": url,
             "host": (urlsplit(url).hostname or "").lower(),
             "status": status or None,
-            "mime": (content.get("mimeType") or "").split(";")[0].strip().lower() or None,
+            "mime": mime or None,
             "resource_type": entry.get("_resourceType") if isinstance(entry.get("_resourceType"), str) else None,
             "size": int(size) if size is not None else None,
             "time_ms": _number(entry.get("time")),
@@ -156,16 +189,30 @@ def parse_har(raw: bytes) -> dict[str, Any]:
         raise ImportFailed("The HAR file contains no readable requests.")
     # Keep the recorded order; sort by start time only when every entry has one.
     if all(i["started_ms"] is not None for i in items):
-        items.sort(key=lambda i: i["started_ms"])
+        order = sorted(range(len(items)), key=lambda n: items[n]["started_ms"])
+        items, responses = [items[n] for n in order], [responses[n] for n in order]
     for index, item in enumerate(items):
         item["index"] = index
 
+    found = correlation.detect(items, responses)
+    secrets = _hide_secrets(items)
+    check_suggestions = [
+        {"item": i, **s} for i, r in enumerate(responses)
+        if (s := correlation.suggest_checks(r["body"], r["mime"])) and not items[i].get("error")
+    ]
+
     warnings = []
+    if found["correlations"]:
+        warnings.append(f"{len(found['correlations'])} dynamic value(s) were correlated automatically "
+                        "(see Correlation). Check them with a debug replay.")
+    if found["stopped_early"]:
+        warnings.append("The recording is very large, so automatic correlation stopped early. "
+                        "Add the remaining correlations by hand.")
     if secrets:
         names = ", ".join(f"${{{v}}}" for v in sorted(secrets))
         warnings.append(
-            f"Recorded credential headers were replaced with variables ({names}). Set their values "
-            "in User Defined Variables in JMeter, or add extractors (correlation is the next phase)."
+            f"Recorded credential headers that no response issued were replaced with variables ({names}). "
+            "Give them values under Parameters, or in User Defined Variables in JMeter."
         )
     if "cookie" in dropped:
         warnings.append("Recorded cookies were removed. The HTTP Cookie Manager stores the cookies the "
@@ -182,4 +229,8 @@ def parse_har(raw: bytes) -> dict[str, Any]:
 
     title = next((n for n in pages.values() if n), None)
     first_host = next((i["host"] for i in items if i["host"]), "recording")
-    return {"name": title or first_host, "items": items, "warnings": warnings, "variables": sorted(secrets)}
+    return {
+        "name": title or first_host, "items": items, "warnings": warnings, "variables": sorted(secrets),
+        "design": {"correlations": found["correlations"]},
+        "suggestions": {"checks": check_suggestions, "parameters": found["client_values"]},
+    }
