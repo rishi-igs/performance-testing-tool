@@ -11,8 +11,15 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
+from app.services import auth
 
 FAKE_JMETER = str(Path(__file__).parent / "fake_jmeter.py")
+
+
+@pytest.fixture(autouse=True)
+def fast_password_hashing(monkeypatch):
+    """600,000 PBKDF2 rounds per password make sense in production, not in every test."""
+    monkeypatch.setattr(auth, "ITERATIONS", 1_000)
 
 
 def _free_port() -> int:
@@ -49,6 +56,7 @@ def make_settings(tmp_path: Path, **overrides) -> Settings:
         max_users=50,
         max_duration_seconds=60,
         max_concurrent_tests=2,
+        scheduler_interval_seconds=0,       # tests call app.state.scheduler.tick() themselves
     )
     base.update(overrides)
     return Settings(**base)

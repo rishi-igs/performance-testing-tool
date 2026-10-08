@@ -18,6 +18,9 @@ class TestRecord(BaseModel):
     __test__ = False
     id: str
     name: str
+    kind: str = "quick"
+    scenario_id: str | None = None
+    project_id: str = "p_default"
     status: Status
     config: dict[str, Any]
     summary: dict[str, Any] | None = None

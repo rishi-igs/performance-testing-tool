@@ -22,20 +22,31 @@
     font-variant-numeric: tabular-nums;
   }
   h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+  a { color: var(--accent); }
   button, input, select, textarea { font: inherit; color: inherit; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  [hidden] { display: none !important; }
 
   .app { display: grid; grid-template-columns: 340px 1fr; min-height: 100%; }
   .rail { background: var(--surface); border-right: 1px solid var(--line); padding: 20px; overflow-y: auto; }
   .main { padding: 28px 32px 48px; min-width: 0; }
-  .brand { font-size: 18px; font-weight: 700; margin-bottom: 18px; }
+  .brand { font-size: 18px; font-weight: 700; margin-bottom: 14px; }
   .brand small { display: block; font-weight: 400; color: var(--muted); font-size: 13px; }
+  .userbar { display: grid; gap: 8px; margin: 0 0 14px; font-size: 13px; }
+  .userbar:empty { display: none; }
+  .userbar .who { margin: 0; color: var(--muted); }
+  .userbar .who strong { color: var(--ink); }
+  .sections { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 18px; border-bottom: 1px solid var(--line); }
+  .sections a { padding: 8px 10px; color: var(--muted); text-decoration: none; font-weight: 600; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .sections a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--accent); }
 
   form { display: grid; gap: 12px; margin-bottom: 24px; }
   label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+  label small { color: var(--muted); font-size: 12px; }
   input, select, textarea {
     background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; width: 100%;
   }
+  input[type="checkbox"], input[type="radio"] { width: auto; }
   textarea { resize: vertical; min-height: 64px; }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   details summary { cursor: pointer; font-size: 13px; color: var(--accent); margin-bottom: 8px; }
@@ -48,16 +59,21 @@
   .btn.quiet { background: transparent; color: var(--ink); border: 1px solid var(--line); }
   .btn.quiet:hover { background: var(--paper); }
   .btn.danger { background: var(--fail); }
+  .btn.small { padding: 5px 10px; font-size: 13px; font-weight: 500; }
   .btn[disabled] { opacity: .5; cursor: not-allowed; }
+  .linklike { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; text-align: left;
+    text-decoration: underline; text-underline-offset: 2px; }
   .formerror { color: var(--fail); font-size: 13px; white-space: pre-wrap; }
 
   .runs h2 { font-size: 14px; color: var(--muted); font-weight: 600; margin-bottom: 8px; }
+  .runs + .runs { margin-top: 22px; }
+  .railhead { font-size: 14px; color: var(--muted); font-weight: 600; }
   .run {
-    display: block; width: 100%; text-align: left; background: none; border: 0; cursor: pointer;
-    border-left: 3px solid transparent; padding: 8px 10px; border-radius: 0 6px 6px 0;
+    display: block; width: 100%; text-align: left; background: none; border: 0; cursor: pointer; color: inherit;
+    text-decoration: none; border-left: 3px solid transparent; padding: 8px 10px; border-radius: 0 6px 6px 0;
   }
   .run:hover { background: var(--paper); }
-  .run[aria-current="true"] { background: var(--accent-soft); border-left-color: var(--accent); }
+  .run[aria-current="page"] { background: var(--accent-soft); border-left-color: var(--accent); }
   .run .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .run .sub { font-size: 13px; color: var(--muted); }
   .empty { color: var(--muted); font-size: 14px; }
@@ -66,10 +82,13 @@
   .badge.running { background: var(--accent-soft); color: #0b5a73; }
   .badge.completed { background: var(--pass-bg); color: var(--pass); }
   .badge.failed { background: var(--fail-bg); color: var(--fail); }
-  .badge.stopped { background: var(--warn-bg); color: var(--warn); }
+  .badge.stopped { background: var(--warn-bg); color: #7a4e00; }
+  .badge.source { background: var(--paper); color: var(--ink); border: 1px solid var(--line); }
 
   .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
   .head h1 { font-size: 26px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .actions a.btn { display: inline-block; text-decoration: none; }
   .verdict { margin: 6px 0 0; font-size: 18px; max-width: 70ch; }
   .verdict.pass { color: var(--pass); } .verdict.fail { color: var(--fail); }
   .url { color: var(--muted); font-size: 13px; word-break: break-all; }
@@ -90,7 +109,7 @@
 
   .section { margin-top: 26px; }
   .section h2 { font-size: 16px; margin-bottom: 8px; }
-  .warn { padding: 10px 12px; border-radius: 6px; margin-bottom: 8px; border-left: 4px solid var(--warn); background: var(--warn-bg); }
+  .warn { padding: 10px 12px; border-radius: 6px; margin: 8px 0; border-left: 4px solid var(--warn); background: var(--warn-bg); }
   .warn.critical { border-left-color: var(--fail); background: var(--fail-bg); }
   .allclear { color: var(--pass); }
   .codes { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -99,28 +118,40 @@
   .links a, .links button { text-decoration: none; }
   .links a.btn { display: inline-block; }
   .notice { background: var(--warn-bg); border-left: 4px solid var(--warn); padding: 10px 12px; border-radius: 6px; margin-bottom: 16px; }
-  .welcome { max-width: 60ch; margin-top: 12vh; }
+  .notice.good { background: var(--pass-bg); border-left-color: var(--pass); }
+  .schedule { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+  .schedule label:not(.check) { width: 150px; }
+  table.results td:first-child { font-weight: 600; }
+  .graphbuilder { display: grid; grid-template-columns: 260px 1fr; gap: 14px; align-items: start; }
+  .serieslist { max-height: 360px; overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
+  .serieslist label.check { font-size: 13px; margin: 2px 0; }
+  .serieslist details summary { color: var(--ink); font-weight: 600; margin: 6px 0 2px; }
+  td.worse { color: var(--fail); font-weight: 600; } td.better { color: var(--pass); font-weight: 600; }
+  @media (max-width: 900px) { .graphbuilder { grid-template-columns: 1fr; } }
+  .welcome { max-width: 64ch; margin-top: 10vh; }
   .welcome h1 { font-size: 30px; margin-bottom: 8px; }
-  .welcome p { color: var(--muted); }
+  .welcome p, ol.steps { color: var(--muted); }
+  ol.steps { padding-left: 20px; } ol.steps li { margin-bottom: 4px; }
 
-  input[type="checkbox"] { width: auto; }
-  .railhead { font-size: 14px; color: var(--muted); font-weight: 600; }
-  .runs + .runs { margin-top: 22px; }
-  .badge.source { background: var(--paper); color: var(--ink); border: 1px solid var(--line); }
-
-  /* Imported script review */
-  .flow { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; padding: 0; margin: 14px 0 0; }
+  /* Script pages */
+  .tabs { display: flex; flex-wrap: wrap; gap: 2px; margin: 20px 0 0; border-bottom: 1px solid var(--line); }
+  .tab { padding: 8px 12px; color: var(--muted); text-decoration: none; font-weight: 600; border-bottom: 3px solid transparent; margin-bottom: -1px; }
+  .tab[aria-current="page"] { color: var(--ink); border-bottom-color: var(--accent); }
+  .tab .count { margin-left: 6px; font-size: 12px; background: var(--paper); border: 1px solid var(--line); border-radius: 99px; padding: 0 7px; color: var(--muted); }
+  .statusline { display: flex; justify-content: space-between; gap: 12px; min-height: 1.5em; margin: 8px 0; }
+  .savestate { font-size: 13px; color: var(--muted); min-height: 1.5em; }
+  .intro { color: var(--muted); max-width: 80ch; margin: 4px 0 14px; }
+  .flow { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; padding: 0; margin: 0; }
   .flow li { background: var(--surface); border: 1px solid var(--line); border-radius: 99px; padding: 2px 10px; font-size: 13px; }
   .flow li small { color: var(--muted); }
   .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 20px 0 8px; }
   .toolbar label { min-width: 150px; }
-  .toolbar label.check { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--ink); padding-bottom: 7px; }
+  .toolbar label.check { min-width: 0; padding-bottom: 7px; }
   .bulk { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; font-size: 13px; color: var(--muted); }
-  .btn.small { padding: 5px 10px; font-size: 13px; font-weight: 500; }
   .tablewrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
-  table.reqs { width: 100%; border-collapse: collapse; font-size: 13px; }
-  .reqs th, .reqs td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
-  .reqs thead th { font-weight: 600; color: var(--muted); white-space: nowrap; }
+  table.reqs, table.grid { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .reqs th, .reqs td, .grid th, .grid td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  .reqs thead th, .grid thead th { font-weight: 600; color: var(--muted); white-space: nowrap; }
   .reqs .grouprow th { background: var(--accent-soft); }
   .groupline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .gnum { font-weight: 600; color: #0b5a73; min-width: 2ch; }
@@ -128,23 +159,54 @@
   .gcount { color: var(--muted); font-weight: 400; }
   .reqs tr.excluded td { color: var(--muted); }
   .reqs tr.excluded .path { text-decoration: line-through; text-decoration-color: var(--line); }
-  .reqs .num { text-align: right; white-space: nowrap; }
+  .reqs .num, .grid .num { text-align: right; white-space: nowrap; }
   .urlcell { min-width: 240px; word-break: break-all; }
   .urlcell .hostname { display: block; color: var(--muted); font-size: 12px; }
   .fname { min-width: 150px; }
   .src { display: block; color: var(--muted); font-size: 11px; }
   .reason { color: var(--muted); min-width: 170px; }
-  .mono { font-family: ui-monospace, Consolas, monospace; }
+  .mono, code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+  .how code { background: var(--paper); border-radius: 4px; padding: 0 4px; word-break: break-all; }
+  .rowactions { white-space: nowrap; text-align: right; }
+  .rowactions .btn + .btn { margin-left: 4px; }
   .exportbox { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
   .exportbox label { width: 120px; }
-  .exportbox a.btn { display: inline-block; text-decoration: none; }
   details.rules form { max-width: 720px; margin: 8px 0 0; }
-  .savestate { font-size: 13px; color: var(--muted); min-height: 1.5em; }
+  label.check { display: flex; align-items: center; gap: 6px; color: var(--ink); font-size: 14px; }
+  form.editor { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin: 14px 0; max-width: 820px; }
+  form.editor h3 { font-size: 16px; }
+  form.inline { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 10px 0 0; }
+  form.inline label:not(.check) { min-width: 220px; }
+  form.settings { max-width: 760px; }
+  fieldset { border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; display: grid; gap: 8px; background: var(--surface); margin: 0; }
+  legend { font-weight: 600; padding: 0 6px; }
+  input.short { width: 90px; display: inline-block; margin: 0 4px; }
+  ul.problems { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+  ul.problems li { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  ul.problems li.bad { border-left: 4px solid var(--fail); }
+  ul.problems li.good { border-left: 4px solid var(--pass); }
+
+  /* Debug replay */
+  .debugbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+  .chip { border: 1px solid var(--line); border-radius: 99px; padding: 2px 10px 2px 4px; font-size: 13px; color: var(--ink); text-decoration: none; background: var(--surface); }
+  .chip[aria-current="page"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .reqs tr.failrow td, .grid tr.failrow td { background: #fdf3f2; }
+  .reqs tr.first td:first-child { box-shadow: inset 4px 0 0 var(--fail); }
+  ul.issues { margin: 0; padding-left: 16px; }
+  .detailrow > td { background: var(--paper); }
+  .detail { display: grid; gap: 12px; padding: 6px 0; }
+  .diagnosis { background: var(--warn-bg); border-left: 4px solid var(--warn); border-radius: 6px; padding: 10px 12px; }
+  .diagnosis p { margin: 2px 0; }
+  .pane h3 { font-size: 14px; margin-bottom: 4px; }
+  pre.code { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; max-height: 320px;
+    overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 6px 0 0; }
 
   @media (max-width: 900px) {
     .app { grid-template-columns: 1fr; }
     .rail { border-right: 0; border-bottom: 1px solid var(--line); }
     .main { padding: 20px 16px 40px; }
+    .row { grid-template-columns: 1fr; }
   }
   @media (prefers-reduced-motion: reduce) { .progress > div { transition: none; } }
 </style>
@@ -153,532 +215,107 @@
 <div class="app">
   <aside class="rail">
     <div class="brand">Load test console<small>Runs Apache JMeter for you</small></div>
+    <div class="userbar" id="userbar"></div>
+    <nav class="sections" aria-label="Sections">
+      <a href="#/quick" data-section="quick">Quick test</a>
+      <a href="#/scripts" data-section="scripts">Scripts</a>
+      <a href="#/scenarios" data-section="scenarios">Scenarios</a>
+      <a href="#/infra" data-section="infra">Infrastructure</a>
+      <a href="#/team" data-section="team" id="nav-team" hidden>Team</a>
+    </nav>
 
-    <form id="form" autocomplete="off">
-      <label>Test name<input name="name" required maxlength="100" value="Homepage load"></label>
-      <label>Target URL<input name="target_url" type="url" required placeholder="https://api.example.com/products"></label>
-      <div class="row">
-        <label>Users / profile peak<input name="users" type="number" min="1" value="10" required></label>
-        <label>Duration (seconds)<input name="duration_seconds" type="number" min="1" value="60" required></label>
-      </div>
-      <details>
-        <summary>More options</summary>
-        <div>
-          <div class="row">
-            <label>Method
-              <select name="method"><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option><option>HEAD</option></select>
-            </label>
-            <label>Ramp-up (seconds)<input name="ramp_up_seconds" type="number" min="0" value="0"></label>
-          </div>
-          <div class="row">
-            <label>Think time (ms)<input name="think_time_ms" type="number" min="0" value="0"></label>
-            <label>Timeout (ms)<input name="timeout_ms" type="number" min="100" value="30000"></label>
-          </div>
-          <label>Optional step-load profile (time in seconds : target users)
-            <textarea name="profile" rows="3" placeholder="0:10&#10;30:50&#10;60:100"></textarea>
-          </label>
-          <small>Start at 0, increase both time and users on each line, and make the final user count match Users / profile peak. Leave ramp-up at 0 for a profile.</small>
-          <label>Expected status codes<input name="expected_status_codes" value="200" placeholder="200, 201"></label>
-          <label>Headers, one per line<textarea name="headers" placeholder="Accept: application/json"></textarea></label>
-          <label>Request body<textarea name="body" placeholder='{"sku": "A-100"}'></textarea></label>
-          <div class="row">
-            <label>Fail if errors exceed (%)<input name="max_error_rate_percent" type="number" min="0" max="100" step="0.1" value="1"></label>
-            <label>Fail if p95 exceeds (ms)<input name="max_p95_ms" type="number" min="1" value="1000"></label>
-          </div>
+    <section id="sec-quick" aria-label="Quick test">
+      <form id="form" autocomplete="off">
+        <label>Test name<input name="name" required maxlength="100" value="Homepage load"></label>
+        <label>Target URL<input name="target_url" type="url" required placeholder="https://api.example.com/products"></label>
+        <div class="row">
+          <label>Users / profile peak<input name="users" type="number" min="1" value="10" required></label>
+          <label>Duration (seconds)<input name="duration_seconds" type="number" min="1" value="60" required></label>
         </div>
-      </details>
-      <button class="btn" type="submit" id="start">Start test</button>
-      <div class="formerror" id="formerror" role="alert"></div>
-    </form>
+        <details>
+          <summary>More options</summary>
+          <div>
+            <div class="row">
+              <label>Method
+                <select name="method"><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option><option>HEAD</option></select>
+              </label>
+              <label>Ramp-up (seconds)<input name="ramp_up_seconds" type="number" min="0" value="0"></label>
+            </div>
+            <div class="row">
+              <label>Think time (ms)<input name="think_time_ms" type="number" min="0" value="0"></label>
+              <label>Timeout (ms)<input name="timeout_ms" type="number" min="100" value="30000"></label>
+            </div>
+            <label>Optional step-load profile (time in seconds : target users)
+              <textarea name="profile" rows="3" placeholder="0:10&#10;30:50&#10;60:100"></textarea>
+            </label>
+            <small>Start at 0, increase both time and users on each line, and make the final user count match Users / profile peak. Leave ramp-up at 0 for a profile.</small>
+            <label>Expected status codes<input name="expected_status_codes" value="200" placeholder="200, 201"></label>
+            <label>Headers, one per line<textarea name="headers" placeholder="Accept: application/json"></textarea></label>
+            <label>Request body<textarea name="body" placeholder='{"sku": "A-100"}'></textarea></label>
+            <div class="row">
+              <label>Fail if errors exceed (%)<input name="max_error_rate_percent" type="number" min="0" max="100" step="0.1" value="1"></label>
+              <label>Fail if p95 exceeds (ms)<input name="max_p95_ms" type="number" min="1" value="1000"></label>
+            </div>
+          </div>
+        </details>
+        <button class="btn" type="submit" id="start">Start test</button>
+        <div class="formerror" id="formerror" role="alert"></div>
+      </form>
+      <div class="runs">
+        <h2>Recent runs</h2>
+        <div id="runs"></div>
+      </div>
+    </section>
 
-    <form id="importform" autocomplete="off" aria-labelledby="import-title">
-      <h2 class="railhead" id="import-title">Import a recording</h2>
-      <label>HAR from browser DevTools, or a JMeter .jmx
-        <input name="file" type="file" accept=".har,.jmx,.json,.xml" required></label>
-      <button class="btn quiet" type="submit" id="importbtn">Import and review</button>
-      <div class="formerror" id="importerror" role="alert"></div>
-    </form>
+    <section id="sec-scripts" aria-label="Scripts" hidden>
+      <form id="importform" autocomplete="off" aria-labelledby="import-title">
+        <h2 class="railhead" id="import-title">Import a recording</h2>
+        <label>HAR from browser DevTools, or a JMeter .jmx
+          <input name="file" type="file" accept=".har,.jmx,.json,.xml" required></label>
+        <button class="btn quiet" type="submit" id="importbtn">Import and review</button>
+        <div class="formerror" id="importerror" role="alert"></div>
+      </form>
+      <div class="runs">
+        <h2>Imported scripts</h2>
+        <div id="scripts"></div>
+      </div>
+    </section>
 
-    <div class="runs">
-      <h2>Recent runs</h2>
-      <div id="runs"></div>
-    </div>
-    <div class="runs">
-      <h2>Imported scripts</h2>
-      <div id="scripts"></div>
-    </div>
+    <section id="sec-infra" aria-label="Infrastructure" hidden>
+      <p class="empty">Load generators share a scenario's users across machines. Monitors read server CPU, memory and more while tests run.</p>
+    </section>
+
+    <section id="sec-scenarios" aria-label="Scenarios" hidden>
+      <p><a class="btn" href="#/scenarios/new" id="newscenario">New scenario</a></p>
+      <div class="runs">
+        <h2>Scenarios</h2>
+        <div id="scenarios"></div>
+      </div>
+    </section>
+
+    <section id="sec-team" aria-label="Team" hidden>
+      <p class="empty">Viewers see results. Testers also build and run tests. Administrators also manage people, projects and infrastructure.</p>
+    </section>
+
+    <section id="sec-account" aria-label="Your account" hidden>
+      <p class="empty">Your password and the API tokens that let pipelines act as you.</p>
+    </section>
   </aside>
 
   <main class="main" id="main"></main>
 </div>
 
-<script>
-"use strict";
-const $ = (sel) => document.querySelector(sel);
-const state = { selected: null, runs: [], authNeeded: false, charts: {}, timer: null,
-  script: null, scripts: [], scriptView: null, rulesOpen: false,
-  filters: { q: "", method: "", domain: "", showExcluded: false }, exportOpts: { users: 1, loops: 1, ramp: 0 } };
-
-// Build DOM with textContent only, so names and error text from the server cannot inject HTML.
-function h(tag, attrs = {}, ...kids) {
-  const el = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === "class") el.className = v;
-    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
-    else if (v !== false && v != null) el.setAttribute(k, v === true ? "" : v);
-  }
-  for (const kid of kids.flat()) if (kid != null) el.append(kid.nodeType ? kid : document.createTextNode(kid));
-  return el;
-}
-const fmt = (n, d = 0) => (n == null ? "–" : Number(n).toLocaleString(undefined, { maximumFractionDigits: d }));
-
-async function api(path, opts = {}) {
-  const res = await fetch(path, { credentials: "same-origin", ...opts,
-    headers: { "Content-Type": "application/json", ...(opts.headers || {}) } });
-  if (res.status === 401) { state.authNeeded = true; renderAuth(); throw new Error("API key required"); }
-  if (!res.ok) {
-    let detail = res.statusText;
-    try {
-      const j = await res.json();
-      detail = Array.isArray(j.detail) ? j.detail.map(d => `${(d.loc || []).slice(1).join(".")}: ${d.msg}`).join("\n") : (j.detail || detail);
-    } catch (_) {}
-    const err = new Error(detail); err.status = res.status; throw err;
-  }
-  return res.status === 204 ? null : res.json();
-}
-
-// ---- API key (only when the server requires one) --------------------------------------
-function renderAuth() {
-  $("#main").replaceChildren(h("div", { class: "welcome" },
-    h("h1", {}, "API key needed"),
-    h("p", {}, "This server requires an API key. Enter it to continue."),
-    h("form", { onsubmit: (e) => { e.preventDefault();
-        document.cookie = `api_key=${encodeURIComponent(e.target.key.value)}; path=/; SameSite=Strict`;
-        state.authNeeded = false; boot(); } },
-      h("label", {}, "API key", h("input", { name: "key", type: "password", required: true })),
-      h("button", { class: "btn", type: "submit" }, "Save key"))));
-}
-
-// ---- New test form ---------------------------------------------------------------------
-function parseHeaders(text) {
-  const headers = {};
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    const i = line.indexOf(":");
-    if (i < 1) throw new Error(`Header "${line}" must look like Name: value`);
-    headers[line.slice(0, i).trim()] = line.slice(i + 1).trim();
-  }
-  return headers;
-}
-function parseProfile(text) {
-  const lines = text.split("\n").map(line => line.trim()).filter(Boolean);
-  return lines.map((line, i) => {
-    const match = line.match(/^(\d+)\s*:\s*(\d+)$/);
-    if (!match) throw new Error(`Profile line ${i + 1} must look like seconds:users`);
-    return { time_seconds: +match[1], users: +match[2] };
-  });
-}
-function formToConfig(f) {
-  const v = (n) => f.elements[n].value;
-  const cfg = {
-    name: v("name").trim(), target_url: v("target_url").trim(), method: v("method"),
-    users: +v("users"), duration_seconds: +v("duration_seconds"), ramp_up_seconds: +v("ramp_up_seconds"),
-    think_time_ms: +v("think_time_ms"), timeout_ms: +v("timeout_ms"),
-    expected_status_codes: v("expected_status_codes").split(",").map(s => parseInt(s, 10)).filter(Number.isInteger),
-    headers: parseHeaders(v("headers")),
-    thresholds: { max_error_rate_percent: +v("max_error_rate_percent"), max_p95_ms: v("max_p95_ms") ? +v("max_p95_ms") : null },
-  };
-  const profile = parseProfile(v("profile"));
-  if (profile.length) cfg.profile = profile;
-  if (v("body").trim() && v("method") !== "GET") cfg.body = v("body");
-  return cfg;
-}
-$("#form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const btn = $("#start"), err = $("#formerror");
-  err.textContent = ""; btn.disabled = true;
-  try {
-    const created = await api("/tests", { method: "POST", body: JSON.stringify(formToConfig(e.target)) });
-    state.selected = created.id; state.script = null;
-    await refreshRuns(); await showRun();
-  } catch (ex) { err.textContent = ex.message; }
-  finally { btn.disabled = false; }
-});
-
-// ---- Run list --------------------------------------------------------------------------
-// "completed" only means JMeter finished. Show whether the results met the limits.
-function outcome(run) {
-  if (run.status === "completed" && run.summary) {
-    if (run.summary.verdict === "pass") return { cls: "completed", label: "passed" };
-    if (run.summary.verdict === "fail") return { cls: "failed", label: "failed limits" };
-  }
-  return { cls: run.status, label: run.status };
-}
-const badge = (run) => { const o = outcome(run); return h("span", { class: `badge ${o.cls}` }, o.label); };
-
-function ago(iso) {
-  const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
-  if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
-  return `${Math.floor(s / 86400)} d ago`;
-}
-async function refreshRuns() {
-  state.runs = await api("/tests");
-  const box = $("#runs");
-  if (!state.runs.length) { box.replaceChildren(h("p", { class: "empty" }, "No runs yet. Start your first test above.")); return; }
-  box.replaceChildren(...state.runs.map(r => h("button", {
-      class: "run", "aria-current": r.id === state.selected && !state.script ? "true" : "false",
-      onclick: () => { state.selected = r.id; state.script = null; refreshRuns(); refreshScripts(); showRun(); } },
-    h("div", { class: "name" }, r.name),
-    h("div", { class: "sub" }, badge(r), " ", ago(r.created_at)))));
-}
-
-// ---- Run detail ------------------------------------------------------------------------
-function verdictLine(run) {
-  const m = run.summary;
-  if (run.status === "running") return null;
-  if (run.status === "failed" && run.error) return { cls: "fail", text: run.error };
-  if (!m || m.verdict === "no_data") return { cls: "fail", text: "The test produced no results." };
-  const facts = `${fmt(m.total_requests)} requests, ${fmt(m.error_rate_percent, 2)}% errors, p95 ${fmt(m.response_time_ms.p95)} ms.`;
-  if (m.verdict === "pass") return { cls: "pass", text: `Passed. ${facts}` };
-  return { cls: "fail", text: `Failed. ${facts}` };
-}
-
-const setMain = (...nodes) => $("#main").replaceChildren(...nodes.flat().filter(n => n != null && n !== false));
-
-function stat(value, label) { return h("div", { class: "stat" }, h("div", { class: "v" }, value), h("div", { class: "l" }, label)); }
-
-function drawCharts(points) {
-  const labels = points.map(p => `${p.t}s`);
-  const base = { responsive: true, maintainAspectRatio: false, animation: false,
-    interaction: { mode: "index", intersect: false }, plugins: { legend: { position: "bottom", labels: { boxWidth: 12 } } },
-    scales: { x: { grid: { display: false }, ticks: { maxTicksLimit: 12 } } } };
-
-  const mk = (id, cfg) => {
-    if (state.charts[id]) { state.charts[id].data = cfg.data; state.charts[id].update("none"); return; }
-    const el = document.getElementById(id); if (!el) return;
-    state.charts[id] = new Chart(el, cfg);
-  };
-  mk("chart-latency", { type: "line", data: { labels, datasets: [
-      { label: "Active users", data: points.map(p => p.users), yAxisID: "users", fill: true, stepped: true,
-        borderWidth: 0, backgroundColor: "rgba(15,110,140,.14)", pointRadius: 0, order: 3 },
-      { label: "p95 response time (ms)", data: points.map(p => p.p95_ms), yAxisID: "ms", borderColor: "#0f6e8c", backgroundColor: "#0f6e8c", borderWidth: 2.5, pointRadius: 0, tension: .25, order: 1 },
-      { label: "Average (ms)", data: points.map(p => p.avg_ms), yAxisID: "ms", borderColor: "#16222e", backgroundColor: "#16222e", borderWidth: 1.5, borderDash: [5, 4], pointRadius: 0, tension: .25, order: 2 } ] },
-    options: { ...base, scales: { ...base.scales,
-      ms: { position: "left", beginAtZero: true, title: { display: true, text: "Response time (ms)" } },
-      users: { position: "right", beginAtZero: true, grid: { display: false }, title: { display: true, text: "Active users" } } } } });
-  mk("chart-throughput", { type: "bar", data: { labels, datasets: [
-      { type: "line", label: "Requests per second", data: points.map(p => p.rps), yAxisID: "rps", borderColor: "#0f6e8c", backgroundColor: "#0f6e8c", borderWidth: 2, pointRadius: 0, tension: .25 },
-      { type: "bar", label: "Error rate (%)", data: points.map(p => p.error_rate_percent), yAxisID: "err", backgroundColor: "rgba(179,38,30,.55)" } ] },
-    options: { ...base, scales: { ...base.scales,
-      rps: { position: "left", beginAtZero: true, title: { display: true, text: "Requests/s" } },
-      err: { position: "right", beginAtZero: true, max: 100, grid: { display: false }, title: { display: true, text: "Errors (%)" } } } } });
-}
-
-async function showRun() {
-  clearTimeout(state.timer);
-  if (state.script) return;          // an imported script is open instead
-  if (!state.selected) { renderWelcome(); return; }
-  let run;
-  try { run = await api(`/tests/${state.selected}`); } catch (e) { return; }
-  const timeline = await api(`/tests/${state.selected}/timeline?bucket_seconds=${run.config.duration_seconds <= 120 ? 2 : run.config.duration_seconds <= 900 ? 5 : 30}`).catch(() => ({ points: [] }));
-  if (state.script) return;          // the user opened a script while this loaded
-  renderRun(run, timeline.points);
-  if (run.status === "running") state.timer = setTimeout(() => { refreshRuns(); showRun(); }, 2000);
-  else refreshRuns();
-}
-
-function renderRun(run, points) {
-  const scrollY = window.scrollY;   // live runs re-render every 2s: keep the reader's place
-  const m = run.summary, c = run.config, v = verdictLine(run), id = run.id;
-  const running = run.status === "running";
-  let pct = 0;
-  if (running && run.started_at) pct = Math.min(100, ((Date.now() - Date.parse(run.started_at)) / 1000) / c.duration_seconds * 100);
-
-  const dl = (path, label) => h("a", { class: "btn quiet", href: `/reports/${id}/${path}`, target: path === "" ? "_blank" : null, rel: "noopener" }, label);
-  const headersShown = Object.keys(c.headers || {}).length;
-
-  Object.values(state.charts).forEach(ch => ch.destroy()); state.charts = {};
-
-  setMain(
-    h("div", { class: "head" },
-      h("div", {},
-        h("h1", {}, run.name, " ", badge(run)),
-        h("div", { class: "url" }, `${c.method} ${c.target_url} · ${c.profile ? `step load to ${c.users} users` : `${c.users} users`} · ${c.duration_seconds}s${c.profile ? ` · ${c.profile.map(s => `${s.users} at ${s.time_seconds}s`).join(" → ")}` : c.ramp_up_seconds ? ` with ${c.ramp_up_seconds}s ramp-up` : ""}${headersShown ? ` · ${headersShown} custom header${headersShown > 1 ? "s" : ""}` : ""}`),
-        running ? h("p", { class: "verdict" }, "Running. Results update every two seconds.") : (v && h("p", { class: `verdict ${v.cls}` }, v.text))),
-      running ? h("button", { class: "btn danger", onclick: stopRun }, "Stop test") : null),
-    running ? h("div", { class: "progress" }, h("div", { style: `width:${pct}%` })) : null,
-
-    h("div", { class: "hero" }, h("h2", {}, "Response time and load"),
-      h("div", { class: "chartbox" }, h("canvas", { id: "chart-latency" }), points.length ? null : h("div", { class: "nodata" }, running ? "Waiting for the first results…" : "No data recorded"))),
-
-    m && m.total_requests ? h("div", { class: "stats" },
-      stat(fmt(m.total_requests), "Requests"),
-      stat(`${fmt(m.error_rate_percent, 2)}%`, `Errors (${fmt(m.failed_requests)})`),
-      stat(`${fmt(m.response_time_ms.p50)} ms`, "Median"),
-      stat(`${fmt(m.response_time_ms.p95)} ms`, "p95"),
-      stat(`${fmt(m.response_time_ms.p99)} ms`, "p99"),
-      stat(fmt(m.throughput_rps, 1), "Requests per second"),
-      stat(fmt(m.peak_users), "Peak users")) : null,
-
-    m && m.total_requests ? h("div", { class: "hero" }, h("h2", {}, "Throughput and errors"),
-      h("div", { class: "chartbox small" }, h("canvas", { id: "chart-throughput" }))) : null,
-
-    m && m.total_requests ? h("div", { class: "section" }, h("h2", {}, "Findings"),
-      m.warnings.length ? m.warnings.map(w => h("div", { class: `warn ${w.severity}` }, w.message))
-        : h("p", { class: "allclear" }, running ? "No problems detected so far." : "No problems found against your limits.")) : null,
-
-    m && m.total_requests ? h("div", { class: "section" }, h("h2", {}, "Status codes"),
-      h("div", { class: "codes" }, Object.entries(m.status_codes).map(([k, n]) => h("span", { class: "code" }, `${k}: ${fmt(n)}`)))) : null,
-
-    h("div", { class: "section" }, h("h2", {}, "Downloads"),
-      h("div", { class: "links" },
-        running ? null : dl("", "JMeter HTML report"), dl("metrics.json", "Metrics (JSON)"), dl("results.csv", "Raw results (CSV)"),
-        dl("plan.jmx", "Test plan (.jmx)"), dl("jmeter.log", "JMeter log"))));
-
-  if (points.length) drawCharts(points);
-  window.scrollTo(0, scrollY);
-}
-
-async function stopRun() {
-  try { await api(`/tests/${state.selected}/stop`, { method: "POST" }); await showRun(); }
-  catch (e) { alert(e.message); }
-}
-
-function renderWelcome() {
-  $("#main").replaceChildren(h("div", { class: "welcome" },
-    h("h1", {}, "Find slow spots before your users do"),
-    h("p", {}, "Enter a URL, pick how many virtual users should call it and for how long, then start the test. Results appear here while it runs."),
-    h("p", {}, "To test a whole user flow, import a HAR recording or a JMeter .jmx: unwanted requests are filtered out and the rest are grouped by business function."),
-    h("p", {}, "Only test systems you own or have permission to test.")));
-}
-
-// ---- Imported scripts (HAR / JMX): review, filter, group, export ----------------------
-$("#importform").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const file = e.target.elements.file.files[0], btn = $("#importbtn"), err = $("#importerror");
-  err.textContent = "";
-  if (!file) return;
-  const jmx = /\.jmx$/i.test(file.name);
-  btn.disabled = true; btn.textContent = "Importing…";
-  try {
-    const name = file.name.replace(/\.(har|jmx|json|xml)$/i, "").slice(0, 100);
-    const created = await api(`/scripts/import-${jmx ? "jmx" : "har"}?name=${encodeURIComponent(name)}`,
-      { method: "POST", body: file, headers: { "Content-Type": jmx ? "application/xml" : "application/json" } });
-    e.target.reset();
-    await openScript(created.id, created);
-  } catch (ex) { err.textContent = ex.message; }
-  finally { btn.disabled = false; btn.textContent = "Import and review"; }
-});
-
-async function refreshScripts() {
-  state.scripts = await api("/scripts");
-  const box = $("#scripts");
-  if (!state.scripts.length) { box.replaceChildren(h("p", { class: "empty" }, "No imports yet.")); return; }
-  box.replaceChildren(...state.scripts.map(s => h("button", {
-      class: "run", "aria-current": s.id === state.script ? "true" : "false", onclick: () => openScript(s.id) },
-    h("div", { class: "name" }, s.name),
-    h("div", { class: "sub" }, h("span", { class: "badge source" }, s.source.toUpperCase()),
-      ` ${fmt(s.request_count)} requests · ${ago(s.created_at)}`))));
-}
-
-async function openScript(id, data) {
-  clearTimeout(state.timer);
-  if (state.script !== id) {
-    state.filters = { q: "", method: "", domain: "", showExcluded: false };
-    state.exportOpts = { users: 1, loops: 1, ramp: 0 };
-  }
-  state.script = id;
-  try { state.scriptView = data || await api(`/scripts/${id}`); }
-  catch (e) { setMain(h("div", { class: "notice" }, e.message)); return; }
-  refreshRuns(); refreshScripts();
-  renderScript();
-}
-
-async function saveScript(body) {
-  const focusKey = document.activeElement && document.activeElement.dataset.key;
-  const status = $("#savestate");
-  if (status) status.textContent = "Saving…";
-  try {
-    state.scriptView = await api(`/scripts/${state.script}/filter`, { method: "PUT", body: JSON.stringify(body) });
-    renderScript(focusKey);
-    $("#savestate").textContent = "Saved";
-  } catch (e) {
-    if (status) { status.textContent = ""; }
-    const err = $("#scripterror"); if (err) err.textContent = `Not saved: ${e.message}`;
-  }
-}
-
-async function deleteScript() {
-  if (!confirm(`Delete the import "${state.scriptView.name}"? This cannot be undone.`)) return;
-  try { await api(`/scripts/${state.script}`, { method: "DELETE" }); }
-  catch (e) { $("#scripterror").textContent = e.message; return; }
-  state.script = null; state.scriptView = null;
-  await refreshScripts(); await refreshRuns();
-  if (state.selected) showRun(); else renderWelcome();
-}
-
-const fmtBytes = (n) => n < 1024 ? `${fmt(n)} B` : n < 1048576 ? `${fmt(n / 1024, 1)} KB` : `${fmt(n / 1048576, 1)} MB`;
-const listOf = (text) => text.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
-function urlParts(u) {
-  try { const x = new URL(u); return { host: x.host, path: x.pathname + x.search }; }
-  catch (_) { return { host: "", path: u }; }
-}
-function parseRules(text) {
-  return text.split("\n").map(l => l.trim()).filter(Boolean).map((line, i) => {
-    const at = line.indexOf("=");
-    if (at < 1 || !line.slice(at + 1).trim()) throw new Error(`Rule line ${i + 1} must look like Name = URL pattern`);
-    return { name: line.slice(0, at).trim(), url_pattern: line.slice(at + 1).trim() };
-  });
-}
-function exportHref() {
-  const o = state.exportOpts;
-  return `/scripts/${state.script}/export-jmx?users=${o.users}&loops=${o.loops}&ramp_up_seconds=${o.ramp}`;
-}
-
-function scriptRow(it) {
-  const why = !it.include ? (it.include_source === "manual" ? "Excluded by you" : it.auto_reason)
-    : (it.include_source === "manual" && it.auto_reason ? `Kept by you (rule: ${it.auto_reason})` : null);
-  const where = it.url ? urlParts(it.url) : null;
-  return h("tr", { class: it.include ? null : "excluded" },
-    h("td", {}, h("input", { type: "checkbox", checked: it.include, "data-key": `i-${it.index}`,
-      "aria-label": `Keep ${it.label}`, onchange: (e) => saveScript({ changes: [{ index: it.index, include: e.target.checked }] }) })),
-    h("td", { class: "mono" }, it.method || "–"),
-    h("td", { class: "urlcell" }, where ? [h("span", { class: "path" }, where.path), h("span", { class: "hostname" }, where.host)] : it.label),
-    h("td", {}, it.status == null ? "–" : String(it.status)),
-    h("td", {}, it.resource_type || (it.mime ? it.mime.split("/").pop() : it.kind === "other" ? "JMeter" : "–")),
-    h("td", { class: "num" }, it.size == null ? "–" : fmtBytes(it.size)),
-    h("td", { class: "num" }, it.time_ms == null ? "–" : `${fmt(it.time_ms)} ms`),
-    h("td", {}, h("input", { class: "fname", value: it.transaction, list: "fnames", maxlength: 80, "data-key": `t-${it.index}`,
-        "aria-label": `Business function for ${it.label}`,
-        onchange: (e) => saveScript({ changes: [{ index: it.index, transaction: e.target.value.trim() || null }] }) }),
-      it.transaction_source === "auto" ? null : h("small", { class: "src" }, it.transaction_source === "rule" ? "from a rule" : "edited")),
-    h("td", { class: "reason" }, why || it.note || ""));
-}
-
-function groupRow(chunk) {
-  const first = chunk[0], kept = chunk.filter(i => i.include).length;
-  return h("tr", { class: "grouprow" }, h("th", { colspan: 9, scope: "colgroup" },
-    h("div", { class: "groupline" },
-      h("span", { class: "gnum" }, first.transaction_number ? String(first.transaction_number).padStart(2, "0") : "–"),
-      h("input", { class: "gname", value: first.transaction, maxlength: 80, "data-key": `g-${first.index}`,
-        "aria-label": `Rename business function ${first.transaction}`,
-        onchange: (e) => { const v = e.target.value.trim();
-          if (v) saveScript({ changes: chunk.map(i => ({ index: i.index, transaction: v })) }); } }),
-      h("span", { class: "gcount" }, `${kept} kept${chunk.length > kept ? `, ${chunk.length - kept} excluded` : ""}`))));
-}
-
-function renderScript(focusKey) {
-  const s = state.scriptView, f = state.filters, sum = s.summary;
-  const scrollY = window.scrollY;
-  Object.values(state.charts).forEach(ch => ch.destroy()); state.charts = {};
-
-  const q = f.q.toLowerCase();
-  const visible = s.items.filter(i => (f.showExcluded || i.include)
-    && (!f.method || i.method === f.method) && (!f.domain || i.host === f.domain)
-    && (!q || `${i.label} ${i.url || ""} ${i.transaction}`.toLowerCase().includes(q)));
-  const chunks = [];
-  for (const it of visible) {
-    const last = chunks[chunks.length - 1];
-    if (last && last[0].transaction === it.transaction) last.push(it); else chunks.push([it]);
-  }
-  const options = (values, current) => [h("option", { value: "" }, "All"),
-    ...values.map(v => h("option", { value: v, selected: v === current }, v))];
-  const hosts = [...new Set(s.items.map(i => i.host).filter(Boolean))].sort();
-  const methods = [...new Set(s.items.map(i => i.method).filter(Boolean))].sort();
-  const o = state.exportOpts;
-  const exportInput = (label, key, max) => h("label", {}, label, h("input", { type: "number", min: key === "ramp" ? 0 : 1, max,
-    value: o[key], oninput: (e) => { o[key] = Math.max(+e.target.min, parseInt(e.target.value, 10) || 0);
-      const a = $("#exportlink"); if (a) a.href = exportHref(); } }));
-
-  setMain(
-    h("div", { class: "head" },
-      h("div", {},
-        h("h1", {}, s.name, " ", h("span", { class: "badge source" }, s.source.toUpperCase())),
-        h("p", { class: "verdict" }, `${fmt(sum.captured)} captured, ${fmt(sum.kept)} kept, ${fmt(sum.excluded)} excluded · `
-          + `${sum.transactions} business function${sum.transactions === 1 ? "" : "s"}`))),
-    s.transactions.length ? h("ol", { class: "flow", "aria-label": "Business functions in run order" },
-      s.transactions.map(t => h("li", {}, `${String(t.number).padStart(2, "0")} ${t.name} `, h("small", {}, `(${t.requests})`)))) : null,
-
-    s.warnings.length ? h("div", { class: "section" }, s.warnings.map(w => h("div", { class: "warn" }, w))) : null,
-
-    h("div", { class: "section" }, h("h2", {}, "Export"),
-      h("div", { class: "exportbox" },
-        s.source === "har" ? [exportInput("Users", "users"), exportInput("Loops", "loops", 100000), exportInput("Ramp-up (s)", "ramp", 3600)]
-          : h("p", { class: "empty" }, "Thread groups keep the settings from your imported plan."),
-        sum.kept ? h("a", { class: "btn", id: "exportlink", href: exportHref() }, "Download .jmx")
-          : h("button", { class: "btn", disabled: true }, "Download .jmx (nothing kept)"),
-        h("button", { class: "btn quiet", onclick: deleteScript }, "Delete import"))),
-
-    h("div", { class: "toolbar" },
-      h("label", {}, "Search", h("input", { type: "search", value: f.q, "data-key": "f-q", placeholder: "URL or function",
-        oninput: (e) => { f.q = e.target.value; renderScript("f-q"); } })),
-      h("label", {}, "Method", h("select", { "data-key": "f-m", onchange: (e) => { f.method = e.target.value; renderScript("f-m"); } }, options(methods, f.method))),
-      h("label", {}, "Domain", h("select", { "data-key": "f-d", onchange: (e) => { f.domain = e.target.value; renderScript("f-d"); } }, options(hosts, f.domain))),
-      h("label", { class: "check" }, h("input", { type: "checkbox", checked: f.showExcluded, "data-key": "f-x",
-        onchange: (e) => { f.showExcluded = e.target.checked; renderScript("f-x"); } }), `Show excluded (${fmt(sum.excluded)})`)),
-
-    h("div", { class: "bulk" },
-      h("span", {}, `${fmt(visible.length)} shown:`),
-      h("button", { class: "btn quiet small", onclick: () => saveScript({ changes: visible.map(i => ({ index: i.index, include: true })) }) }, "Keep all shown"),
-      h("button", { class: "btn quiet small", onclick: () => saveScript({ changes: visible.map(i => ({ index: i.index, include: false })) }) }, "Exclude all shown"),
-      h("button", { class: "btn quiet small", onclick: () => saveScript({ changes: visible.map(i => ({ index: i.index, include: null, transaction: null })) }) }, "Reset shown to automatic"),
-      h("button", { class: "btn quiet small", "aria-pressed": String(s.rules.keep_only_api),
-        onclick: () => saveScript({ rules: { ...s.rules, keep_only_api: !s.rules.keep_only_api } }) }, "Keep API calls only"),
-      h("span", { class: "savestate", id: "savestate", role: "status" })),
-    h("div", { class: "formerror", id: "scripterror", role: "alert" }),
-
-    h("div", { class: "tablewrap" }, h("table", { class: "reqs" },
-      h("thead", {}, h("tr", {}, ["Keep", "Method", "Request", "Status", "Type", "Size", "Time", "Business function", "Why"]
-        .map(t => h("th", { scope: "col" }, t)))),
-      h("tbody", {}, visible.length ? chunks.flatMap(c => [groupRow(c), ...c.map(scriptRow)])
-        : h("tr", {}, h("td", { colspan: 9, class: "empty" }, "No requests match these filters."))))),
-    h("datalist", { id: "fnames" }, [...new Set(s.items.map(i => i.transaction))].map(n => h("option", { value: n }))),
-
-    h("details", { class: "rules section", open: state.rulesOpen, ontoggle: (e) => { state.rulesOpen = e.target.open; } },
-      h("summary", {}, "Filter and grouping rules"),
-      h("form", { onsubmit: (e) => { e.preventDefault(); const el = e.target.elements;
-          let rules;
-          try { rules = parseRules(el.tx.value); } catch (ex) { $("#ruleserror").textContent = ex.message; return; }
-          saveScript({ rules: { ...s.rules, transaction_rules: rules, idle_gap_seconds: +el.gap.value,
-            exclude_extensions: listOf(el.ext.value), exclude_mime_types: listOf(el.mime.value),
-            exclude_domains: listOf(el.domains.value), exclude_methods: listOf(el.methods.value) } }); } },
-        h("label", {}, "Business-function rules, one per line: Name = URL pattern",
-          h("textarea", { name: "tx", rows: 4, placeholder: "Login = */auth/*\nSearch = */api/search*" },
-            s.rules.transaction_rules.map(r => `${r.name} = ${r.url_pattern}`).join("\n"))),
-        h("small", {}, "* matches anything. The first matching rule wins over automatic grouping; your own edits win over rules."),
-        h("label", {}, "Start a new business function after this many idle seconds (0 turns it off)",
-          h("input", { name: "gap", type: "number", min: 0, max: 600, step: 0.5, value: s.rules.idle_gap_seconds })),
-        h("label", {}, "Exclude file extensions", h("textarea", { name: "ext", rows: 2 }, s.rules.exclude_extensions.join(", "))),
-        h("label", {}, "Exclude response content types", h("textarea", { name: "mime", rows: 2 }, s.rules.exclude_mime_types.join(", "))),
-        h("label", {}, "Exclude domains (analytics, ads, chat widgets)", h("textarea", { name: "domains", rows: 5 }, s.rules.exclude_domains.join("\n"))),
-        h("label", {}, "Exclude methods", h("input", { name: "methods", value: s.rules.exclude_methods.join(", ") })),
-        h("button", { class: "btn", type: "submit" }, "Apply rules"),
-        h("div", { class: "formerror", id: "ruleserror", role: "alert" }))));
-
-  window.scrollTo(0, scrollY);
-  const target = focusKey && document.querySelector(`[data-key="${focusKey}"]`);
-  if (target) {
-    target.focus({ preventScroll: true });
-    if (target.type === "search") target.setSelectionRange(target.value.length, target.value.length);
-  }
-}
-
-// ---- Boot ------------------------------------------------------------------------------
-async function boot() {
-  try {
-    const health = await api("/health");
-    await refreshRuns();
-    await refreshScripts();
-    if (!state.selected && state.runs.length) state.selected = state.runs[0].id;
-    await showRun();
-    if (!state.selected) renderWelcome();
-  } catch (e) {
-    if (!state.authNeeded) $("#main").replaceChildren(h("div", { class: "notice" }, `Cannot reach the server: ${e.message}`));
-  }
-}
-boot();
-</script>
+<script src="/js/core.js"></script>
+<script src="/js/quick.js"></script>
+<script src="/js/scripts.js"></script>
+<script src="/js/design.js"></script>
+<script src="/js/debug.js"></script>
+<script src="/js/scenarios.js"></script>
+<script src="/js/results.js"></script>
+<script src="/js/analysis.js"></script>
+<script src="/js/infra.js"></script>
+<script src="/js/schedules.js"></script>
+<script src="/js/team.js"></script>
+<script src="/js/app.js"></script>
 </body>
 </html>

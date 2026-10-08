@@ -170,4 +170,8 @@ def test_interrupted_tests_are_marked_failed_on_restart(tmp_path, target_url):
     with TestClient(create_app(settings)) as c2:
         rec = c2.get(f"/tests/{test_id}").json()
         assert rec["status"] == "failed" and "restarted" in rec["error"]
-    os.killpg(os.getpgid(orphan.pid), signal.SIGKILL)   # clean up the simulated orphan
+    # clean up the simulated orphan
+    if os.name == "nt":
+        orphan.kill()
+    else:
+        os.killpg(os.getpgid(orphan.pid), signal.SIGKILL)
