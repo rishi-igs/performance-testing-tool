@@ -10,7 +10,8 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import Settings, load_settings
 from .db import Database
-from .routers import reports, scripts, tests
+from .routers import debug, reports, scripts, tests
+from .services.debug_runner import DebugRunExecutor
 from .services.test_executor import TestExecutor
 
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
@@ -25,12 +26,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings.runs_dir.mkdir(parents=True, exist_ok=True)
         db = Database(settings.db_path)
         interrupted = db.mark_interrupted()
+        interrupted_debug = db.mark_interrupted_debug_runs()
         if interrupted:
             logging.getLogger("perf").warning("marked %d interrupted test(s) as failed", interrupted)
         app.state.settings = settings
         app.state.db = db
         app.state.executor = TestExecutor(settings, db)
+        app.state.debug_executor = DebugRunExecutor(settings, db, app.state.executor)
+        if interrupted_debug:
+            logging.getLogger("perf").warning("marked %d interrupted debug run(s) as failed", interrupted_debug)
         yield
+        app.state.debug_executor.shutdown()
         app.state.executor.shutdown()
 
     app = FastAPI(title="Performance Testing Tool", version="0.1.0", lifespan=lifespan)
@@ -42,6 +48,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(tests.router)
     app.include_router(reports.router)
     app.include_router(scripts.router)
+    app.include_router(debug.router)
     if FRONTEND_DIR.is_dir():
         app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="ui")
     return app

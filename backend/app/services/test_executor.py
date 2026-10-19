@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -22,6 +23,17 @@ log = logging.getLogger("perf.executor")
 
 KILL_GRACE_SECONDS = 15
 RUNTIME_SLACK_SECONDS = 900
+
+if os.name == "nt":
+    if not hasattr(os, "getpgid"):
+        def _win_getpgid(pid: int) -> int:
+            return int(pid)
+        os.getpgid = _win_getpgid
+
+    if not hasattr(os, "killpg"):
+        def _win_killpg(pgid: int, sig: int) -> None:
+            os.kill(int(pgid), sig)
+        os.killpg = _win_killpg
 
 
 class TooManyTests(RuntimeError):
@@ -58,6 +70,7 @@ class TestExecutor:
         self.settings = settings
         self.db = db
         self._runs: dict[str, _Run] = {}
+        self._external_slots: set[str] = set()
         self._lock = threading.Lock()
 
     # ---- public API -------------------------------------------------------
@@ -70,7 +83,7 @@ class TestExecutor:
                 if r.thread and r.thread.is_alive()
             )
 
-            if active >= self.settings.max_concurrent_tests:
+            if active + len(self._external_slots) >= self.settings.max_concurrent_tests:
                 raise TooManyTests(
                     f"{active} tests are already running "
                     f"(limit {self.settings.max_concurrent_tests})"
@@ -106,6 +119,21 @@ class TestExecutor:
 
             self._runs[test_id] = run
             run.thread.start()
+
+    def reserve_external_slot(self, run_id: str) -> None:
+        """Share the same concurrency limit with debug-run executors."""
+        with self._lock:
+            active = sum(1 for run in self._runs.values() if run.thread and run.thread.is_alive())
+            if active + len(self._external_slots) >= self.settings.max_concurrent_tests:
+                raise TooManyTests(
+                    f"{active + len(self._external_slots)} tests are already running "
+                    f"(limit {self.settings.max_concurrent_tests})"
+                )
+            self._external_slots.add(run_id)
+
+    def release_external_slot(self, run_id: str) -> None:
+        with self._lock:
+            self._external_slots.discard(run_id)
 
     def stop(self, test_id: str) -> bool:
         """Request a stop. Returns False if the test is not running here."""
@@ -180,6 +208,21 @@ class TestExecutor:
             return [sys.executable, self.settings.jmeter_bin]
         return ["cmd.exe", "/c", self.settings.jmeter_bin]
 
+    def _check_jmeter_available(self) -> None:
+        if self.settings.jmeter_bin.lower().endswith(".py"):
+            if not Path(self.settings.jmeter_bin).exists():
+                raise FileNotFoundError(
+                    f"JMeter was not found ('{self.settings.jmeter_bin}'). "
+                    "Install Apache JMeter or set JMETER_BIN to its full path."
+                )
+            return
+
+        if shutil.which(self.settings.jmeter_bin) is None:
+            raise FileNotFoundError(
+                f"JMeter was not found ('{self.settings.jmeter_bin}'). "
+                "Install Apache JMeter or set JMETER_BIN to its full path."
+            )
+
     @staticmethod
     def _jmeter_environment() -> dict[str, str]:
         # JMETER_BIN is also reserved by JMeter's Windows launcher for its bin directory.
@@ -238,6 +281,8 @@ class TestExecutor:
         error: str | None = None
 
         try:
+            self._check_jmeter_available()
+
             with paths["stdout"].open("wb") as out:
 
                 proc = subprocess.Popen(
@@ -370,7 +415,7 @@ class TestExecutor:
 
             if error is None:
                 error = (
-                    f"JMeter exited with code {exit_code}. "
+                    f"JMeter exited with code {exit_code} while using JMETER_BIN={self.settings.jmeter_bin}. "
                     "See jmeter_stdout.log."
                 )
 

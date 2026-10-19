@@ -4,14 +4,43 @@ A management layer around Apache JMeter. You describe a test (URL, users, durati
 the tool generates the JMeter plan, runs JMeter headlessly, tracks the run, parses the
 results into p50/p95/p99, throughput and error rate, and explains problems in plain language.
 
-**Status: Phases 2 and 3 in progress.** One request per test, fixed-user tests and step-load profiles,
-API + dashboard + CLI. HAR and JMX import with request filtering, grouping by business function
-and `.jmx` export (Phase 3A and 3B). Correlation, parameterization, running imported scripts,
-other traffic profiles, CI baselines, etc. are still to come (see "What's next").
+**Status: Phase 2 traffic profiles and Phase 3A–3H implementation are in place.** The tool supports HAR/JMX import, request
+filtering and grouping, JSON correlation, CSV parameterization, a HAR comparison validator,
+scoped assertion authoring, and bounded debug runs with sample viewing, diagnosis, and reruns.
+Phase 3's exit criterion still needs a real authenticated multi-step browser recording to pass
+end-to-end against an authorized target. Full-load execution of imported recordings, other traffic
+stress/spike profile scheduling, CI baselines, and later roadmap features are still to come.
 
 ## Quick start
 
 Requirements: Python 3.11+, Java 17+, [Apache JMeter 5.6+](https://jmeter.apache.org/download_jmeter.cgi).
+
+### Run every automated check with one command (Windows)
+
+From the repository root, run:
+
+```bat
+npm run test
+```
+
+This command starts the local sample target and dashboard, checks both health endpoints and
+the dashboard page, compiles the Python sources, runs the complete backend test suite, checks
+the dashboard JavaScript syntax, runs the Playwright browser workflow, and stops the temporary
+services when finished. Set
+`JMETER_BIN` first if JMeter is not installed at `C:\apache-jmeter-5.6.3\bin\jmeter.bat`.
+The same runner can also be called directly with `scripts\test-all.cmd` or
+`.\scripts\test-all.ps1`.
+
+The first setup requires browser-test dependencies:
+
+```bat
+npm install
+npx playwright install chromium
+```
+
+The browser test opens the dashboard in Chromium, imports
+`manual-test-data\phase3-demo.har`, validates the generated plan, starts a debug run, and
+checks that both requests pass.
 
 ```bash
 cd backend
@@ -50,6 +79,8 @@ echo $?     # 0 passed, 1 failed thresholds, 2 could not run
 ```
 
 Set `PERF_API_KEY` if the server has `API_KEY` set.
+Use `--baseline <completed-test-id>` to fail the command when the new run regresses
+error rate, latency, or throughput against a previous run.
 
 ## Import a recording (HAR or JMX)
 
@@ -94,11 +125,49 @@ When a `.jmx` is imported, Transaction, Simple and Recording Controllers are rep
 new grouping, and elements inside them move with their requests. Other logic controllers
 (If, Loop, While, ...) are kept as one block so their behaviour does not change.
 
-**Recorded data.** The HAR file itself is not stored. Cookies and response bodies are dropped;
-`Authorization`, API-key and CSRF headers are replaced with variables such as
-`${authorization}` (fill them in JMeter's User Defined Variables until correlation arrives).
-Request bodies are kept as recorded, so use test accounts when recording. An imported `.jmx`
-is stored as uploaded so it can be rebuilt. Delete an import from its page when you are done.
+**Recorded data and correlation.** The HAR file itself and response bodies are not stored.
+Cookies are dropped; `Authorization`, API-key and CSRF headers are replaced with variables.
+For JSON responses, the importer detects sufficiently long or token/session/id-like values that
+appear in later request URLs, headers or bodies. It saves only each JSONPath, source request,
+target requests and variable name, substitutes `${variable}` into those requests, and adds a
+JMeter JSON Extractor to the source sampler. Review or edit the variable, source request,
+JSONPath and enabled state under **Correlations** before exporting. This initial correlation
+pass does not yet detect values in non-JSON responses or correlate cookie values; JMeter's
+Cookie Manager handles server-set cookies. Request bodies can still contain other recorded
+personal or test data, so use sanitized recordings and test accounts. An imported `.jmx` is
+stored as uploaded so it can be rebuilt. Delete an import from its page when you are done.
+
+**CSV parameterization (HAR imports).** Upload a UTF-8 CSV to validate its unique column names
+and row count, then map selected request values to JMeter variables and CSV columns. For example,
+mapping `recorded-user` to the `username` column replaces that literal in the request with
+`${username}`. The sample value is discarded after substitution. CSV contents are validated in
+memory and never stored by the server; keep the original file in your browser and download it as
+`parameters.csv` alongside the exported plan. Alternatively, run JMeter with
+`-Jperf.data.file=<path-to-csv>`. Configure recycling and CSV sharing in the import review. When
+recycling is disabled, the UI warns if the CSV has fewer rows than the export's user count.
+
+**HAR comparison validator (initial).** Select **Validate generated plan** in an imported HAR
+review to compare each kept request with its generated JMeter sampler for endpoint, method,
+headers, body, recorded response-code assertion, and order. It also reports disabled or missing
+correlation sources, unknown JMeter variables, and likely unparameterized IDs or token-like
+values. Query values and request-body/header contents are not shown in the report. This checks
+the generated plan structure; it does not execute requests against the target application.
+
+**Assertions.** The assertion editor supports status codes (`200` or `2xx`), response-text
+contains/not-contains/equals/regex, JSONPath, response headers, duration limits, and response-size
+ranges. Rules can apply globally, to a transaction, or to a request. HAR imports suggest the
+recorded status code and selected stable JSON success fields. Debug summaries count failed
+assertion checks separately from failed samples. Review the suggestions and saved rules before
+exporting or debugging.
+
+**Debug runs (HAR imports).** Start a sequential JMeter run with 1–5 users and 1–5 iterations.
+Debug runs are separate from performance-test metrics and use the same target security policy
+and concurrency limit. The viewer shows each request/response, timing, assertions, and masked
+correlation metadata; it supports failed-only filtering, body search, rule-based diagnosis, history,
+and reruns. For parameterized scripts, send the validated CSV again as the raw request body for
+each run and rerun. Raw JTL and JMeter-log downloads require the configured API key but may contain
+unmasked request/response data; treat them as sensitive artifacts. Debug results currently have no
+retention policy or at-rest encryption.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -107,7 +176,21 @@ is stored as uploaded so it can be rebuilt. Delete an import from its page when 
 | GET | `/scripts` | list imports |
 | GET | `/scripts/{id}` | requests with keep/exclude reasons, business functions, rules |
 | PUT | `/scripts/{id}/filter` | `{"changes": [{"index": 3, "include": false, "transaction": "Login"}], "rules": {...}}`; `null` returns a field to automatic |
+| PUT | `/scripts/{id}/correlations` | save edited JSONPath rules and variable names |
+| PUT | `/scripts/{id}/parameters/csv` | validate CSV headers and row count; file contents are not retained |
+| PUT | `/scripts/{id}/parameters` | replace recorded values with CSV-backed JMeter variables |
+| POST | `/scripts/{id}/validate` | compare kept HAR requests with the generated plan and report unresolved values |
+| PUT | `/scripts/{id}/assertions` | save scoped assertion rules |
 | GET | `/scripts/{id}/export-jmx?users=1&loops=1&ramp_up_seconds=0` | download the grouped `.jmx` (load options apply to HAR imports) |
+| POST | `/debug-runs/scripts/{id}?users=1&loops=1` | start a bounded debug run; send the CSV as the raw body when parameterized |
+| GET | `/debug-runs/scripts/{id}` | list debug-run history |
+| GET | `/debug-runs/{run_id}` | read debug-run status and summary |
+| POST | `/debug-runs/{run_id}/rerun` | rerun with the same user/iteration limits; send CSV when parameterized |
+| GET | `/debug-runs/{run_id}/samples?failed_only=true&search=` | list/search debug samples |
+| GET | `/debug-runs/{run_id}/samples/{sample_index}` | read one sanitized sample |
+| GET | `/debug-runs/{run_id}/diagnosis` | get rule-based failure suggestions |
+| GET | `/debug-runs/{run_id}/results.jtl` | download raw debug JTL (sensitive) |
+| GET | `/debug-runs/{run_id}/jmeter.log` | download JMeter log |
 | DELETE | `/scripts/{id}` | delete an import |
 
 ```bash
@@ -115,8 +198,9 @@ curl -X POST --data-binary @recording.har -H "Content-Type: application/json" \
      "http://127.0.0.1:8000/scripts/import-har?name=Checkout"
 ```
 
-Imported scripts are exported, not run by the tool yet: open the `.jmx` in JMeter, or wait for the
-debug-run phase.
+Imported JMX files can be edited and exported. The current in-tool debug runner is for HAR imports;
+to execute an imported JMX, open it in JMeter. Full-load execution of imported recordings is not
+implemented yet.
 
 ## Configuration of a test
 
@@ -164,6 +248,7 @@ profile:
 | GET | `/tests/{id}` | config, state, summary |
 | GET | `/tests/{id}/status` | state plus live metrics |
 | GET | `/tests/{id}/timeline` | per-interval series for charts |
+| GET | `/tests/{id}/compare?baseline_id=<id>` | compare completed metrics with a baseline run |
 | POST | `/tests/{id}/stop` | stop a running test (partial results are kept) |
 | GET | `/reports/{id}` | JMeter HTML report |
 | GET | `/reports/{id}/metrics.json` | export metrics |
@@ -226,7 +311,7 @@ the pipeline can be tested without JMeter installed.
 | Phase | Adds |
 |---|---|
 | 2 | Step-load profiles (implemented); ramp, spike, soak, and multi-phase profiles |
-| 3 | HAR/JMX import, filtering and business-function grouping (implemented); correlation, parameterization, validator, assertion builder, debug runs, running imported scripts |
+| 3 | HAR/JMX import, filtering, grouping, JSON correlation, CSV parameterization, HAR validator, assertion builder, and bounded HAR debug workflow (implemented; real multi-step exit criterion remains to be verified); full-load execution of imported recordings |
 | 4 | Run comparison and live-chart polish |
 | 5-9 | Analysis summaries, infrastructure metrics, CI baselines, distributed runs, browser tests |
 

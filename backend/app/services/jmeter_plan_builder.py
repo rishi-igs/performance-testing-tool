@@ -82,6 +82,17 @@ def _add_header_manager(parent_tree: ET.Element, headers: Iterable[tuple[str, st
         _prop(h, "stringProp", "Header.value", value)
 
 
+def _add_json_extractor(parent_tree: ET.Element, variable: str, expression: str) -> None:
+    extractor, _ = _element(
+        parent_tree, "JSONPostProcessor", "JSONPostProcessorGui", "JSONPostProcessor",
+        f"Extract {variable}",
+    )
+    _prop(extractor, "stringProp", "JSONPostProcessor.referenceNames", variable)
+    _prop(extractor, "stringProp", "JSONPostProcessor.jsonPathExprs", expression)
+    _prop(extractor, "stringProp", "JSONPostProcessor.match_numbers", "1")
+    _prop(extractor, "stringProp", "JSONPostProcessor.defaultValues", "NOT_FOUND")
+
+
 def _add_status_assertion(parent_tree: ET.Element, codes: Iterable[int], *, ignore_status: bool) -> None:
     """Response code must equal one of `codes`.
 
@@ -96,6 +107,69 @@ def _add_status_assertion(parent_tree: ET.Element, codes: Iterable[int], *, igno
     _prop(ra, "stringProp", "Assertion.test_field", "Assertion.response_code")
     _prop(ra, "boolProp", "Assertion.assume_success", ignore_status)
     _prop(ra, "intProp", "Assertion.test_type", _EQUALS_OR)
+
+
+def _add_response_assertion(
+    parent_tree: ET.Element,
+    field: str,
+    value: str,
+    operator: str,
+    name: str,
+    *,
+    case_sensitive: bool = True,
+) -> None:
+    ra, _ = _element(parent_tree, "ResponseAssertion", "AssertionGui", "ResponseAssertion", name)
+    strings = ET.SubElement(ra, "collectionProp", {"name": "Asserion.test_strings"})
+    _prop(strings, "stringProp", value, value)
+    _prop(ra, "stringProp", "Assertion.custom_message", "")
+    _prop(ra, "stringProp", "Assertion.test_field", field)
+    _prop(ra, "boolProp", "Assertion.assume_success", False)
+    _prop(ra, "boolProp", "Assertion.case_sensitive", case_sensitive)
+    operators = {"contains": 2, "not_contains": 6, "equals": 8, "matches": 1}
+    _prop(ra, "intProp", "Assertion.test_type", operators[operator])
+
+
+def _add_assertion(parent_tree: ET.Element, check: dict[str, Any]) -> None:
+    kind = check["type"]
+    if kind == "status_code":
+        expected = check["expected"]
+        value = expected[0] + r"\d\d" if isinstance(expected, str) else str(expected)
+        operator = "matches" if isinstance(expected, str) else "equals"
+        _add_response_assertion(parent_tree, "Assertion.response_code", value, operator, "Expected response code")
+    elif kind in {"text_contains", "text_not_contains", "text_equals", "text_matches"}:
+        operators = {
+            "text_contains": "contains", "text_not_contains": "not_contains",
+            "text_equals": "equals", "text_matches": "matches",
+        }
+        _add_response_assertion(parent_tree, "Assertion.response_data", check["value"],
+                                operators[kind], "Response text assertion")
+    elif kind == "header_value":
+        _add_response_assertion(parent_tree, "Assertion.response_headers", f"{check['name']}: {check['value']}",
+                                check["operator"], "Response header assertion", case_sensitive=False)
+    elif kind == "json_path":
+        assertion, _ = _element(parent_tree, "JSONPathAssertion", "JSONPathAssertionGui",
+                                "JSONPathAssertion", "JSONPath assertion")
+        _prop(assertion, "stringProp", "JSON_PATH", check["path"])
+        _prop(assertion, "stringProp", "EXPECTED_VALUE", check.get("expected") or "")
+        _prop(assertion, "boolProp", "JSONVALIDATION", check.get("expected") is not None)
+        _prop(assertion, "boolProp", "EXPECT_NULL", False)
+        _prop(assertion, "boolProp", "INVERT", not check.get("exists", True))
+        _prop(assertion, "boolProp", "ISREGEX", False)
+    elif kind == "duration":
+        assertion, _ = _element(parent_tree, "DurationAssertion", "DurationAssertionGui",
+                                "DurationAssertion", "Maximum response duration")
+        _prop(assertion, "stringProp", "DurationAssertion.duration", check["max_ms"])
+    elif kind == "response_size":
+        for name, operator, value in (
+            ("Minimum response size", "5", check["min_bytes"]),
+            ("Maximum response size", "6", check["max_bytes"]),
+        ):
+            if value is None or (operator == ">=" and value == 0):
+                continue
+            assertion, _ = _element(parent_tree, "SizeAssertion", "SizeAssertionGui",
+                                    "SizeAssertion", name)
+            _prop(assertion, "stringProp", "SizeAssertion.size", value)
+            _prop(assertion, "stringProp", "SizeAssertion.operator", operator)
 
 
 def add_transaction_controller(parent_tree: ET.Element, name: str) -> ET.Element:
@@ -155,7 +229,7 @@ def build_plan(config: LoadTestConfig) -> str:
     sampler_name = f"{config.method} {(url.path or '/') + (f'?{url.query}' if url.query else '')}"
     if config.profile is None:
         cohorts = [(config.users, "", config.duration_seconds, "Virtual users", config.ramp_up_seconds)]
-    else:
+    elif config.test_type == "load":
         cohorts = []
         previous_users = 0
         for index, step in enumerate(config.profile):
@@ -167,6 +241,19 @@ def build_plan(config: LoadTestConfig) -> str:
                 0,
             ))
             previous_users = step.users
+    else:
+        cohorts = [
+            (
+                step.users,
+                step.time_seconds,
+                (config.profile[index + 1].time_seconds
+                 if index + 1 < len(config.profile) else config.duration_seconds)
+                - step.time_seconds,
+                f"Phase {index + 1}: {step.users} users",
+                0,
+            )
+            for index, step in enumerate(config.profile)
+        ]
 
     for users, delay, duration, group_name, ramp_time in cohorts:
         _add_thread_group(
@@ -253,6 +340,10 @@ def build_recorded_plan(
     ramp_up_seconds: int = 0,
     loops: int = 1,
     timeout_ms: int = 30_000,
+    correlations: Iterable[dict[str, Any]] = (),
+    parameterization: dict[str, Any] | None = None,
+    csv_headers: Iterable[str] = (),
+    assertions: Iterable[dict[str, Any]] | None = None,
 ) -> str:
     """Plan for an imported recording: one Transaction Controller per business function.
 
@@ -284,6 +375,11 @@ def build_recorded_plan(
     if common:
         _add_header_manager(plan_tree, common, "Common headers")
     common_keys = {(n.lower(), v) for n, v in common}
+    extractors: dict[int, list[dict[str, Any]]] = {}
+    for rule in correlations:
+        if rule.get("enabled", True):
+            extractors.setdefault(rule["source_index"], []).append(rule)
+    assertion_rules = list(assertions) if assertions is not None else None
 
     tg, tg_tree = _element(plan_tree, "ThreadGroup", "ThreadGroupGui", "ThreadGroup", "Recorded flow")
     _prop(tg, "stringProp", "ThreadGroup.on_sample_error", "continue")
@@ -301,6 +397,31 @@ def build_recorded_plan(
     _prop(tg, "stringProp", "ThreadGroup.delay", "")
     _prop(tg, "boolProp", "ThreadGroup.same_user_on_next_iteration", True)
 
+    parameterization = parameterization or {}
+    headers = list(csv_headers)
+    if parameterization.get("parameters"):
+        dataset, _ = _element(
+            tg_tree, "CSVDataSet", "TestBeanGUI", "CSVDataSet", "CSV Data Set Config",
+        )
+        _prop(dataset, "stringProp", "filename", "${__P(perf.data.file,parameters.csv)}")
+        _prop(dataset, "stringProp", "fileEncoding", "UTF-8")
+        _prop(dataset, "stringProp", "variableNames", ",".join(headers))
+        _prop(dataset, "stringProp", "delimiter", ",")
+        _prop(dataset, "boolProp", "quotedData", True)
+        _prop(dataset, "boolProp", "recycle", parameterization.get("recycle", True))
+        _prop(dataset, "boolProp", "stopThread", False)
+        sharing_modes = {
+            "all_threads": "shareMode.all",
+            "per_thread_group": "shareMode.group",
+            "per_thread": "shareMode.thread",
+        }
+        _prop(
+            dataset, "stringProp", "shareMode",
+            sharing_modes[parameterization.get("sharing_mode", "all_threads")],
+        )
+        _prop(dataset, "boolProp", "ignoreFirstLine", False)
+        _prop(dataset, "boolProp", "allowQuotedData", True)
+
     for number, (tx_name, requests) in enumerate(transactions, 1):
         tc_tree = add_transaction_controller(tg_tree, f"{number:02d} {tx_name}")
         for r in requests:
@@ -313,8 +434,21 @@ def build_recorded_plan(
             own = [(n, v) for n, v in r["headers"] if (n.lower(), v) not in common_keys]
             if own:
                 _add_header_manager(sampler_tree, own)
-            if r.get("status"):
+            applicable = []
+            if assertion_rules is not None:
+                applicable = [
+                    rule for rule in assertion_rules
+                    if (rule["scope"] == "global"
+                        or (rule["scope"] == "transaction" and rule["transaction"] == tx_name)
+                        or (rule["scope"] == "request" and rule["request_index"] == r["index"]))
+                ]
+            if assertion_rules is None and r.get("status"):
                 _add_status_assertion(sampler_tree, [r["status"]], ignore_status=True)
+            for rule in applicable:
+                for check in rule["checks"]:
+                    _add_assertion(sampler_tree, check)
+            for rule in extractors.get(r["index"], []):
+                _add_json_extractor(sampler_tree, rule["variable"], rule["expression"])
 
     vrt, _ = _element(plan_tree, "ResultCollector", "ViewResultsFullVisualizer", "ResultCollector", "View Results Tree")
     vrt.set("enabled", "false")

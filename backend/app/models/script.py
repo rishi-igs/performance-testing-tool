@@ -1,7 +1,9 @@
 """Models for imported scripts (HAR or JMX): filter rules, edits and export options."""
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Requirements 8.3 defaults, plus the static types JMeter's own recorder template excludes.
 DEFAULT_EXTENSIONS = [
@@ -84,3 +86,139 @@ class ScriptUpdate(BaseModel):
 
     changes: list[RequestChange] = Field(default_factory=list, max_length=20_000)
     rules: FilterRules | None = None
+
+
+class CorrelationRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_index: int = Field(ge=0)
+    target_indices: list[int] = Field(min_length=1, max_length=10_000)
+    variable: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+    extractor: Literal["json"] = "json"
+    expression: str = Field(min_length=1, max_length=500)
+    enabled: bool = True
+
+
+class CorrelationsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    correlations: list[CorrelationRule] = Field(default_factory=list, max_length=200)
+
+    @field_validator("correlations")
+    @classmethod
+    def _unique_variables(cls, rules: list[CorrelationRule]) -> list[CorrelationRule]:
+        variables = [rule.variable for rule in rules]
+        if len(variables) != len(set(variables)):
+            raise ValueError("correlation variable names must be unique")
+        return rules
+
+
+class ParameterRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    variable: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+    column: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+    recorded_value: str | None = Field(default=None, min_length=1, max_length=100_000)
+
+
+class ParameterizationUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    parameters: list[ParameterRule] = Field(default_factory=list, max_length=200)
+    recycle: bool = True
+    sharing_mode: Literal["all_threads", "per_thread_group", "per_thread"] = "all_threads"
+
+    @field_validator("parameters")
+    @classmethod
+    def _unique_parameters(cls, rules: list[ParameterRule]) -> list[ParameterRule]:
+        variables = [rule.variable for rule in rules]
+        if len(variables) != len(set(variables)):
+            raise ValueError("parameter variable names must be unique")
+        columns = [rule.column for rule in rules]
+        if len(columns) != len(set(columns)):
+            raise ValueError("each CSV column can be assigned to only one variable")
+        return rules
+
+
+class StatusCodeCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["status_code"]
+    expected: int | Literal["2xx", "3xx", "4xx", "5xx"]
+
+
+class TextCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["text_contains", "text_not_contains", "text_equals", "text_matches"]
+    value: str = Field(min_length=1, max_length=10_000)
+
+
+class JsonPathCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["json_path"]
+    path: str = Field(min_length=1, max_length=500)
+    expected: str | None = Field(default=None, max_length=10_000)
+    exists: bool = True
+
+
+class HeaderCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["header_value"]
+    name: str = Field(min_length=1, max_length=256)
+    value: str = Field(min_length=1, max_length=10_000)
+    operator: Literal["contains", "equals", "matches"] = "contains"
+
+
+class DurationCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["duration"]
+    max_ms: int = Field(gt=0, le=3_600_000)
+
+
+class ResponseSizeCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["response_size"]
+    min_bytes: int = Field(default=0, ge=0)
+    max_bytes: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _valid_range(self):
+        if self.max_bytes is not None and self.max_bytes < self.min_bytes:
+            raise ValueError("max_bytes must be greater than or equal to min_bytes")
+        return self
+
+
+AssertionCheck = Annotated[
+    StatusCodeCheck | TextCheck | JsonPathCheck | HeaderCheck | DurationCheck | ResponseSizeCheck,
+    Field(discriminator="type"),
+]
+
+
+class AssertionRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scope: Literal["global", "transaction", "request"]
+    request_index: int | None = Field(default=None, ge=0)
+    transaction: str | None = Field(default=None, min_length=1, max_length=80)
+    checks: list[AssertionCheck] = Field(min_length=1, max_length=50)
+
+    @model_validator(mode="after")
+    def _valid_scope(self):
+        if self.scope == "request" and self.request_index is None:
+            raise ValueError("request_index is required for request-scoped assertions")
+        if self.scope == "transaction" and not self.transaction:
+            raise ValueError("transaction is required for transaction-scoped assertions")
+        if self.scope == "global" and (self.request_index is not None or self.transaction is not None):
+            raise ValueError("global assertions cannot specify a request or transaction")
+        if self.scope == "request" and self.transaction is not None:
+            raise ValueError("request-scoped assertions cannot specify a transaction")
+        return self
+
+
+class AssertionsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    assertions: list[AssertionRule] = Field(default_factory=list, max_length=10_000)
+
+
+class DebugRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    users: int = Field(default=1, ge=1, le=5)
+    loops: int = Field(default=1, ge=1, le=5)

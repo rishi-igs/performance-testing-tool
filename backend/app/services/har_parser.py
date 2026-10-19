@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import json
 import re
+import base64
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
 from ..models.test_config import SENSITIVE_HEADERS
+from .correlation import detect_correlations
 
 MAX_REQUESTS = 10_000
 MAX_BODY_CHARS = 1_000_000
@@ -126,6 +128,12 @@ def parse_har(raw: bytes) -> dict[str, Any]:
             multipart += 1
 
         content = resp.get("content") if isinstance(resp.get("content"), dict) else {}
+        response_text = content.get("text") if isinstance(content.get("text"), str) else None
+        if response_text is not None and content.get("encoding") == "base64":
+            try:
+                response_text = base64.b64decode(response_text).decode("utf-8", errors="replace")
+            except (ValueError, base64.binascii.Error):
+                response_text = None
         status = resp.get("status") if isinstance(resp.get("status"), int) else 0
         error = resp.get("_error") if isinstance(resp.get("_error"), str) and resp.get("_error") else None
         size = _number(content.get("size"))
@@ -150,6 +158,15 @@ def parse_har(raw: bytes) -> dict[str, Any]:
             "error": error or (None if status else "No response recorded (cancelled or blocked)"),
             "headers": headers,
             "body": body,
+            "_response_text": response_text,
+            "_raw_request": {
+                "url": url,
+                "body": body,
+                "headers": {
+                    str(h.get("name") or ""): str(h.get("value") or "")
+                    for h in req.get("headers", []) if isinstance(h, dict) and h.get("name")
+                },
+            },
         })
 
     if not items:
@@ -160,12 +177,36 @@ def parse_har(raw: bytes) -> dict[str, Any]:
     for index, item in enumerate(items):
         item["index"] = index
 
+    assertions = []
+    for item in items:
+        checks = [{"type": "status_code", "expected": item["status"]}] if item.get("status") else []
+        response_text = item.get("_response_text")
+        if response_text:
+            try:
+                response_json = json.loads(response_text)
+            except (json.JSONDecodeError, TypeError):
+                response_json = None
+            if isinstance(response_json, dict):
+                for key, value in response_json.items():
+                    if (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
+                            and key.lower() in {"status", "success", "ok", "issuccess"}
+                            and (isinstance(value, bool)
+                                 or isinstance(value, str) and value.lower() in {"ok", "success", "created"})):
+                        checks.append({"type": "json_path", "path": f"$.{key}", "exists": True})
+                        if len(checks) >= 3:
+                            break
+        if checks:
+            assertions.append({"scope": "request", "request_index": item["index"], "checks": checks})
+
+    correlations, correlation_warnings = detect_correlations(items)
+
     warnings = []
+    warnings.extend(correlation_warnings)
     if secrets:
         names = ", ".join(f"${{{v}}}" for v in sorted(secrets))
         warnings.append(
             f"Recorded credential headers were replaced with variables ({names}). Set their values "
-            "in User Defined Variables in JMeter, or add extractors (correlation is the next phase)."
+            "in User Defined Variables in JMeter unless a matching response value was detected."
         )
     if "cookie" in dropped:
         warnings.append("Recorded cookies were removed. The HTTP Cookie Manager stores the cookies the "
@@ -182,4 +223,17 @@ def parse_har(raw: bytes) -> dict[str, Any]:
 
     title = next((n for n in pages.values() if n), None)
     first_host = next((i["host"] for i in items if i["host"]), "recording")
-    return {"name": title or first_host, "items": items, "warnings": warnings, "variables": sorted(secrets)}
+    variables = sorted({
+        name
+        for item in items
+        for value in (
+            item.get("url") or "",
+            item.get("body") or "",
+            *(header_value for _, header_value in item.get("headers", [])),
+        )
+        for name in re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", value)
+    })
+    return {
+        "name": title or first_host, "items": items, "warnings": warnings,
+        "variables": variables, "correlations": correlations, "assertions": assertions,
+    }
