@@ -102,6 +102,29 @@
   .welcome { max-width: 60ch; margin-top: 12vh; }
   .welcome h1 { font-size: 30px; margin-bottom: 8px; }
   .welcome p { color: var(--muted); }
+  .workflow { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-top: 20px; }
+  .workflow-step { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .workflow-step.done { border-color: #9bcdb2; background: var(--pass-bg); }
+  .workflow-step .num { display: block; color: var(--muted); font-size: 12px; font-weight: 600; }
+  .workflow-step strong { display: block; margin-top: 2px; font-size: 13px; }
+  .workflow-step small { display: block; margin-top: 3px; color: var(--muted); line-height: 1.3; }
+  .script-summary { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 8px; margin-top: 18px; }
+  .summary-card { padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .summary-card .value { font-size: 22px; font-weight: 600; }
+  .summary-card .label { color: var(--muted); font-size: 12px; }
+  .section-nav { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 14px; }
+  .section-nav a { color: var(--accent); text-decoration: none; border: 1px solid var(--line); border-radius: 99px; padding: 4px 10px; font-size: 13px; background: var(--surface); }
+  .section-nav a:hover { background: var(--accent-soft); }
+  @media (max-width: 900px) {
+    .app { grid-template-columns: 1fr; }
+    .rail { border-right: 0; border-bottom: 1px solid var(--line); }
+    .workflow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .script-summary { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+  }
+  @media (max-width: 560px) {
+    .main { padding: 20px 16px 36px; }
+    .workflow, .script-summary { grid-template-columns: 1fr 1fr; }
+  }
 
   input[type="checkbox"] { width: auto; }
   .railhead { font-size: 14px; color: var(--muted); font-weight: 600; }
@@ -138,8 +161,20 @@
   .exportbox { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
   .exportbox label { width: 120px; }
   .exportbox a.btn { display: inline-block; text-decoration: none; }
+  .parameter-form { display: grid; gap: 10px; max-width: 760px; }
+  .parameter-form textarea { min-height: 130px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+  .parameter-form .row { align-items: end; }
   details.rules form { max-width: 720px; margin: 8px 0 0; }
   .savestate { font-size: 13px; color: var(--muted); min-height: 1.5em; }
+  .correlation-list { display: grid; gap: 10px; }
+  .correlation { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(150px, .7fr) minmax(180px, 1fr) auto; gap: 10px; align-items: end; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .correlation small { color: var(--muted); }
+  .validation-report { margin-top: 12px; }
+  .validation-row { padding: 10px 12px; margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .validation-row summary { cursor: pointer; font-weight: 600; }
+  .validation-row ul { margin: 8px 0 0; padding-left: 20px; }
+  .debug-results pre { max-height: 320px; overflow: auto; padding: 10px; background: var(--paper); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  @media (max-width: 900px) { .correlation { grid-template-columns: 1fr; } }
 
   @media (max-width: 900px) {
     .app { grid-template-columns: 1fr; }
@@ -161,6 +196,17 @@
         <label>Users / profile peak<input name="users" type="number" min="1" value="10" required></label>
         <label>Duration (seconds)<input name="duration_seconds" type="number" min="1" value="60" required></label>
       </div>
+      <label>Test type
+        <select name="test_type">
+          <option value="load">Load</option>
+          <option value="stress">Stress</option>
+          <option value="spike">Spike</option>
+          <option value="soak">Soak / endurance</option>
+          <option value="volume">Volume</option>
+          <option value="scalability">Scalability</option>
+          <option value="breakpoint">Breakpoint</option>
+        </select>
+      </label>
       <details>
         <summary>More options</summary>
         <div>
@@ -169,15 +215,16 @@
               <select name="method"><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option><option>HEAD</option></select>
             </label>
             <label>Ramp-up (seconds)<input name="ramp_up_seconds" type="number" min="0" value="0"></label>
+            <label>Ramp-down (seconds)<input name="ramp_down_seconds" type="number" min="0" value="0"></label>
           </div>
           <div class="row">
             <label>Think time (ms)<input name="think_time_ms" type="number" min="0" value="0"></label>
             <label>Timeout (ms)<input name="timeout_ms" type="number" min="100" value="30000"></label>
           </div>
-          <label>Optional step-load profile (time in seconds : target users)
+          <label>Optional traffic profile (time in seconds : target users)
             <textarea name="profile" rows="3" placeholder="0:10&#10;30:50&#10;60:100"></textarea>
           </label>
-          <small>Start at 0, increase both time and users on each line, and make the final user count match Users / profile peak. Leave ramp-up at 0 for a profile.</small>
+          <small>Start at 0. Load profiles must increase to the peak; other test types may rise and fall for spikes or multi-phase traffic.</small>
           <label>Expected status codes<input name="expected_status_codes" value="200" placeholder="200, 201"></label>
           <label>Headers, one per line<textarea name="headers" placeholder="Accept: application/json"></textarea></label>
           <label>Request body<textarea name="body" placeholder='{"sku": "A-100"}'></textarea></label>
@@ -216,7 +263,9 @@
 "use strict";
 const $ = (sel) => document.querySelector(sel);
 const state = { selected: null, runs: [], authNeeded: false, charts: {}, timer: null,
-  script: null, scripts: [], scriptView: null, rulesOpen: false,
+  script: null, scripts: [], scriptView: null, rulesOpen: false, parameterCsvFile: null, validation: null,
+  debugRuns: [], debugRun: null, debugSamples: [], debugDiagnosis: null, debugFailedOnly: false,
+  debugSearch: "", debugError: "",
   filters: { q: "", method: "", domain: "", showExcluded: false }, exportOpts: { users: 1, loops: 1, ramp: 0 } };
 
 // Build DOM with textContent only, so names and error text from the server cannot inject HTML.
@@ -281,8 +330,9 @@ function parseProfile(text) {
 function formToConfig(f) {
   const v = (n) => f.elements[n].value;
   const cfg = {
-    name: v("name").trim(), target_url: v("target_url").trim(), method: v("method"),
+    name: v("name").trim(), target_url: v("target_url").trim(), method: v("method"), test_type: v("test_type"),
     users: +v("users"), duration_seconds: +v("duration_seconds"), ramp_up_seconds: +v("ramp_up_seconds"),
+    ramp_down_seconds: +v("ramp_down_seconds"),
     think_time_ms: +v("think_time_ms"), timeout_ms: +v("timeout_ms"),
     expected_status_codes: v("expected_status_codes").split(",").map(s => parseInt(s, 10)).filter(Number.isInteger),
     headers: parseHeaders(v("headers")),
@@ -451,7 +501,13 @@ function renderWelcome() {
     h("h1", {}, "Find slow spots before your users do"),
     h("p", {}, "Enter a URL, pick how many virtual users should call it and for how long, then start the test. Results appear here while it runs."),
     h("p", {}, "To test a whole user flow, import a HAR recording or a JMeter .jmx: unwanted requests are filtered out and the rest are grouped by business function."),
-    h("p", {}, "Only test systems you own or have permission to test.")));
+    h("p", {}, "Only test systems you own or have permission to test."),
+    h("div", { class: "workflow", "aria-label": "Phase 3 workflow" },
+      [["01", "Import", "HAR or JMX recording"], ["02", "Prepare", "Filter, correlate, parameterize"],
+        ["03", "Validate", "Compare the generated plan"], ["04", "Assert", "Define expected behavior"],
+        ["05", "Debug", "Inspect, diagnose, rerun"]].map(([num, title, detail]) =>
+          h("div", { class: "workflow-step done" }, h("span", { class: "num" }, num),
+            h("strong", {}, title), h("small", {}, detail))))));
 }
 
 // ---- Imported scripts (HAR / JMX): review, filter, group, export ----------------------
@@ -488,11 +544,14 @@ async function openScript(id, data) {
   if (state.script !== id) {
     state.filters = { q: "", method: "", domain: "", showExcluded: false };
     state.exportOpts = { users: 1, loops: 1, ramp: 0 };
+    state.parameterCsvFile = null;
+    state.validation = null;
+    state.debugRun = null; state.debugSamples = []; state.debugDiagnosis = null; state.debugRuns = [];
   }
   state.script = id;
   try { state.scriptView = data || await api(`/scripts/${id}`); }
   catch (e) { setMain(h("div", { class: "notice" }, e.message)); return; }
-  refreshRuns(); refreshScripts();
+  refreshRuns(); refreshScripts(); refreshDebugRuns();
   renderScript();
 }
 
@@ -502,6 +561,8 @@ async function saveScript(body) {
   if (status) status.textContent = "Saving…";
   try {
     state.scriptView = await api(`/scripts/${state.script}/filter`, { method: "PUT", body: JSON.stringify(body) });
+    state.validation = null;
+    state.debugDiagnosis = null;
     renderScript(focusKey);
     $("#savestate").textContent = "Saved";
   } catch (e) {
@@ -510,13 +571,215 @@ async function saveScript(body) {
   }
 }
 
+async function saveCorrelations() {
+  const status = $("#correlationstate");
+  const error = $("#correlationerror");
+  const correlations = state.scriptView.correlations.map((rule, i) => ({
+    ...rule,
+    variable: $(`[data-correlation="variable-${i}"]`).value.trim(),
+    source_index: +$(`[data-correlation="source-${i}"]`).value,
+    expression: $(`[data-correlation="expression-${i}"]`).value.trim(),
+    enabled: $(`[data-correlation="enabled-${i}"]`).checked,
+  }));
+  if (status) status.textContent = "Saving…";
+  if (error) error.textContent = "";
+  try {
+    state.scriptView = await api(`/scripts/${state.script}/correlations`, {
+      method: "PUT", body: JSON.stringify({ correlations }),
+    });
+    state.validation = null;
+    state.debugDiagnosis = null;
+    renderScript();
+    $("#correlationstate").textContent = "Saved";
+  } catch (e) {
+    if (status) status.textContent = "";
+    if (error) error.textContent = `Not saved: ${e.message}`;
+  }
+}
+
+async function saveAssertions() {
+  const error = $("#assertionerror");
+  const status = $("#assertionstate");
+  error.textContent = "";
+  let assertions;
+  try {
+    assertions = JSON.parse($("#assertionjson").value);
+    if (!Array.isArray(assertions)) throw new Error("Assertions must be a JSON array.");
+  } catch (e) {
+    error.textContent = `Invalid assertion JSON: ${e.message}`;
+    return;
+  }
+  status.textContent = "Saving…";
+  try {
+    state.scriptView = await api(`/scripts/${state.script}/assertions`, {
+      method: "PUT", body: JSON.stringify({ assertions }),
+    });
+    state.validation = null;
+    state.debugDiagnosis = null;
+    renderScript();
+    $("#assertionstate").textContent = "Saved";
+  } catch (e) {
+    status.textContent = "";
+    error.textContent = e.message;
+  }
+}
+
+async function uploadParameterCsv() {
+  const file = state.parameterCsvFile;
+  const error = $("#parametererror");
+  const status = $("#parameterstate");
+  if (!file) { error.textContent = "Choose a CSV file first."; return; }
+  error.textContent = "";
+  status.textContent = "Validating CSV…";
+  try {
+    const data = await api(`/scripts/${state.script}/parameters/csv`, {
+      method: "PUT", body: file, headers: { "Content-Type": "text/csv" },
+    });
+    state.validation = null;
+    state.debugDiagnosis = null;
+    state.scriptView = await api(`/scripts/${state.script}`);
+    renderScript();
+    $("#parameterstate").textContent = `Validated ${fmt(data.csv_row_count)} rows and ${data.csv_headers.length} columns.`;
+  } catch (e) {
+    status.textContent = "";
+    error.textContent = e.message;
+  }
+}
+
+async function saveParameters() {
+  const error = $("#parametererror");
+  const status = $("#parameterstate");
+  error.textContent = "";
+  let parameters;
+  try {
+    parameters = JSON.parse($("#parameterjson").value);
+    if (!Array.isArray(parameters)) throw new Error("Parameters must be a JSON array.");
+  } catch (e) {
+    error.textContent = `Invalid parameter JSON: ${e.message}`;
+    return;
+  }
+  status.textContent = "Saving…";
+  try {
+    state.scriptView = await api(`/scripts/${state.script}/parameters`, {
+      method: "PUT",
+      body: JSON.stringify({
+        parameters,
+        recycle: $("#parameter-recycle").checked,
+        sharing_mode: $("#parameter-sharing").value,
+      }),
+    });
+    state.validation = null;
+    state.debugDiagnosis = null;
+    renderScript();
+    $("#parameterstate").textContent = "Saved. Recorded values were discarded after substitution.";
+  } catch (e) {
+    status.textContent = "";
+    error.textContent = e.message;
+  }
+}
+
+function downloadParameterCsv() {
+  if (!state.parameterCsvFile) return;
+  const url = URL.createObjectURL(state.parameterCsvFile);
+  const link = h("a", { href: url, download: "parameters.csv" });
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 async function deleteScript() {
   if (!confirm(`Delete the import "${state.scriptView.name}"? This cannot be undone.`)) return;
   try { await api(`/scripts/${state.script}`, { method: "DELETE" }); }
   catch (e) { $("#scripterror").textContent = e.message; return; }
-  state.script = null; state.scriptView = null;
+  state.script = null; state.scriptView = null; state.parameterCsvFile = null; state.validation = null;
+  state.debugRuns = []; state.debugRun = null; state.debugSamples = []; state.debugDiagnosis = null;
   await refreshScripts(); await refreshRuns();
   if (state.selected) showRun(); else renderWelcome();
+}
+
+async function validateScript() {
+  const status = $("#validationstate");
+  const error = $("#validationerror");
+  if (status) status.textContent = "Comparing generated plan…";
+  if (error) error.textContent = "";
+  try {
+    state.validation = await api(`/scripts/${state.script}/validate`, { method: "POST" });
+    renderScript();
+  } catch (e) {
+    if (status) status.textContent = "";
+    if (error) error.textContent = e.message;
+  }
+}
+
+async function refreshDebugRuns() {
+  if (!state.script || !state.scriptView || state.scriptView.source !== "har") return;
+  try {
+    state.debugRuns = await api(`/debug-runs/scripts/${state.script}`);
+    if (!state.debugRun || !state.debugRuns.some(run => run.id === state.debugRun.id)) {
+      state.debugRun = state.debugRuns[0] || null;
+      state.debugSamples = [];
+      state.debugDiagnosis = null;
+      if (state.debugRun) await loadDebugRun(state.debugRun.id);
+    }
+  } catch (e) {
+    state.debugError = e.message;
+    state.debugRuns = [];
+  }
+}
+
+async function loadDebugRun(id) {
+  try {
+    state.debugRun = await api(`/debug-runs/${id}`);
+    state.debugSamples = (await api(`/debug-runs/${id}/samples`)).samples;
+    state.debugDiagnosis = state.debugRun.status === "running"
+      ? null : await api(`/debug-runs/${id}/diagnosis`);
+    state.debugError = "";
+    renderScript();
+  } catch (e) {
+    state.debugError = e.message;
+    renderScript();
+  }
+}
+
+async function startDebugRun(previousId = null) {
+  const error = $("#debugerror");
+  const status = $("#debugstate");
+  if (error) error.textContent = "";
+  if (status) status.textContent = "Validating and starting debug run…";
+  const p = { parameters: [], csv_headers: [], csv_row_count: 0, recycle: true, sharing_mode: "all_threads",
+    ...(state.scriptView.parameterization || {}) };
+  if (p.parameters.length && !state.parameterCsvFile) {
+    if (error) error.textContent = "Select the CSV in this browser to run the parameterized flow.";
+    if (status) status.textContent = "";
+    return;
+  }
+  const opts = { method: "POST" };
+  if (p.parameters.length) {
+    opts.body = state.parameterCsvFile;
+    opts.headers = { "Content-Type": "text/csv" };
+  }
+  try {
+    const path = previousId ? `/debug-runs/${previousId}/rerun`
+      : `/debug-runs/scripts/${state.script}?users=${$("#debug-users").value}&loops=${$("#debug-loops").value}`;
+    const created = await api(path, opts);
+    state.debugRun = created;
+    await refreshDebugRuns();
+    if (status) status.textContent = `Debug run ${created.id} is running…`;
+    for (let attempt = 0; attempt < 620; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      state.debugRun = await api(`/debug-runs/${created.id}`);
+      if (state.debugRun.status !== "running") break;
+      if (status) status.textContent = `Debug run ${created.id} is running…`;
+    }
+    if (state.debugRun.status === "running") {
+      throw new Error("Debug run is still running; select its history entry to refresh.");
+    }
+    await loadDebugRun(created.id);
+    await refreshDebugRuns();
+    if (status) status.textContent = "Debug run finished.";
+  } catch (e) {
+    if (status) status.textContent = "";
+    if (error) error.textContent = e.message;
+  }
 }
 
 const fmtBytes = (n) => n < 1024 ? `${fmt(n)} B` : n < 1048576 ? `${fmt(n / 1024, 1)} KB` : `${fmt(n / 1048576, 1)} MB`;
@@ -569,6 +832,25 @@ function groupRow(chunk) {
       h("span", { class: "gcount" }, `${kept} kept${chunk.length > kept ? `, ${chunk.length - kept} excluded` : ""}`))));
 }
 
+function renderDebugDiagnosis() {
+  if (!state.debugDiagnosis) return null;
+  const failures = state.debugDiagnosis.failures.map(failure => {
+    const suggestions = failure.suggestions.map(suggestion => {
+      const section = suggestion.editor === "samples" ? "debugresults"
+        : suggestion.editor === "target" ? "validation" : suggestion.editor;
+      return h("p", {}, `${suggestion.cause} ${suggestion.fix} `,
+        h("a", { href: `#${section}` }, `Open ${suggestion.editor}`));
+    });
+    return h("div", { class: `warn ${failure.first_failure ? "critical" : ""}` },
+      h("strong", {}, `Request ${failure.index + 1}: ${failure.label} · HTTP ${failure.status_code}`),
+      ...suggestions);
+  });
+  return h("div", { class: "section" },
+    h("h3", {}, "Failure diagnosis"),
+    h("p", {}, state.debugDiagnosis.message),
+    ...failures);
+}
+
 function renderScript(focusKey) {
   const s = state.scriptView, f = state.filters, sum = s.summary;
   const scrollY = window.scrollY;
@@ -588,6 +870,8 @@ function renderScript(focusKey) {
   const hosts = [...new Set(s.items.map(i => i.host).filter(Boolean))].sort();
   const methods = [...new Set(s.items.map(i => i.method).filter(Boolean))].sort();
   const o = state.exportOpts;
+  const p = { parameters: [], csv_headers: [], csv_row_count: 0, recycle: true, sharing_mode: "all_threads",
+    ...(s.parameterization || {}) };
   const exportInput = (label, key, max) => h("label", {}, label, h("input", { type: "number", min: key === "ramp" ? 0 : 1, max,
     value: o[key], oninput: (e) => { o[key] = Math.max(+e.target.min, parseInt(e.target.value, 10) || 0);
       const a = $("#exportlink"); if (a) a.href = exportHref(); } }));
@@ -598,10 +882,170 @@ function renderScript(focusKey) {
         h("h1", {}, s.name, " ", h("span", { class: "badge source" }, s.source.toUpperCase())),
         h("p", { class: "verdict" }, `${fmt(sum.captured)} captured, ${fmt(sum.kept)} kept, ${fmt(sum.excluded)} excluded · `
           + `${sum.transactions} business function${sum.transactions === 1 ? "" : "s"}`))),
+    s.source === "har" ? h("div", { class: "script-summary", "aria-label": "Script preparation status" },
+      h("div", { class: "summary-card" }, h("div", { class: "value" }, fmt(s.correlations.length)),
+        h("div", { class: "label" }, "Correlation rules")),
+      h("div", { class: "summary-card" }, h("div", { class: "value" }, fmt(p.parameters.length)),
+        h("div", { class: "label" }, "CSV mappings")),
+      h("div", { class: "summary-card" }, h("div", { class: "value" }, fmt(s.assertions.length)),
+        h("div", { class: "label" }, "Assertion rules")),
+      h("div", { class: "summary-card" }, h("div", { class: "value" }, state.debugRuns.length ? fmt(state.debugRuns.length) : "—"),
+        h("div", { class: "label" }, "Debug runs"))) : null,
+    s.source === "har" ? h("nav", { class: "section-nav", "aria-label": "Script workflow sections" },
+      [["correlations", "Correlations"], ["parameters", "CSV parameters"], ["validation", "Validate plan"],
+        ["assertions", "Assertions"], ["debugresults", "Debug results"]].map(([id, label]) =>
+        h("a", { href: `#${id}` }, label))) : null,
     s.transactions.length ? h("ol", { class: "flow", "aria-label": "Business functions in run order" },
       s.transactions.map(t => h("li", {}, `${String(t.number).padStart(2, "0")} ${t.name} `, h("small", {}, `(${t.requests})`)))) : null,
 
     s.warnings.length ? h("div", { class: "section" }, s.warnings.map(w => h("div", { class: "warn" }, w))) : null,
+
+    s.source === "har" ? h("div", { class: "section", id: "correlations" },
+      h("h2", {}, "Correlations"),
+      h("p", { class: "empty" }, "Detected response values reused by later requests. Review the JSONPath extractor and variable name; original response values are not stored."),
+      s.correlations.length ? h("div", { class: "correlation-list" }, s.correlations.map((rule, i) => {
+        const targets = rule.target_indices.map(index => s.items[index]).filter(Boolean);
+        const firstTarget = Math.min(...rule.target_indices);
+        const sources = s.items.filter(item => item.index < firstTarget);
+        return h("div", { class: "correlation" },
+          h("label", {}, "JMeter variable", h("input", {
+            value: rule.variable, maxlength: 64, pattern: "[A-Za-z_][A-Za-z0-9_]{0,63}",
+            "data-correlation": `variable-${i}`,
+          })),
+          h("label", {}, "Extract from response to", h("select", { "data-correlation": `source-${i}` },
+            sources.map(item => h("option", {
+              value: item.index, selected: item.index === rule.source_index,
+            }, `${item.index + 1}. ${item.method || ""} ${item.label}`)))),
+          h("label", {}, "JSONPath", h("input", {
+            value: rule.expression, maxlength: 500, "data-correlation": `expression-${i}`,
+          })),
+          h("label", { class: "check" }, h("input", {
+            type: "checkbox", checked: rule.enabled, "data-correlation": `enabled-${i}`,
+          }), "Enabled"),
+          h("small", {}, `Used in: ${targets.map(item => `${item.method} ${item.label}`).join(", ")}`));
+      })) : h("p", { class: "empty" }, "No reusable JSON response values detected in this recording."),
+      s.correlations.length ? h("div", { class: "bulk" },
+        h("button", { class: "btn", onclick: saveCorrelations }, "Save correlation rules"),
+        h("span", { class: "savestate", id: "correlationstate", role: "status" }),
+        h("div", { class: "formerror", id: "correlationerror", role: "alert" })) : null)
+      : null,
+
+    s.source === "har" ? h("div", { class: "section", id: "parameters" },
+      h("h2", {}, "CSV parameterization"),
+      h("p", { class: "empty" }, "Upload a CSV to validate its column names and row count; the file and recorded sample values are not stored by the server. After saving, download the same CSV from this browser and place it beside the exported JMX, or pass -Jperf.data.file=<path> to JMeter."),
+      h("div", { class: "parameter-form" },
+        h("label", {}, "Test data CSV", h("input", {
+          type: "file", accept: ".csv,text/csv",
+          onchange: (e) => { state.parameterCsvFile = e.target.files[0] || null; },
+        })),
+        h("div", { class: "bulk" },
+          h("button", { class: "btn quiet", onclick: uploadParameterCsv }, "Validate uploaded CSV"),
+          state.parameterCsvFile ? h("button", { class: "btn quiet", onclick: downloadParameterCsv }, "Download this CSV as parameters.csv") : null,
+          p.csv_headers.length ? h("span", {}, `${fmt(p.csv_row_count)} rows · columns: ${p.csv_headers.join(", ")}`) : null),
+        p.parameters.length && p.csv_row_count < o.users && !p.recycle
+          ? h("div", { class: "warn" }, `CSV has fewer rows (${p.csv_row_count}) than users (${o.users}); threads may reuse the last values because recycling is off.`)
+          : null,
+        h("label", {}, "Parameter mappings (JSON). Enter each recorded_value once; it is removed after substitution.",
+          h("textarea", { id: "parameterjson", spellcheck: "false" }, JSON.stringify(p.parameters.map(rule => ({
+            variable: rule.variable, column: rule.column,
+          })), null, 2))),
+        h("small", {}, 'Example for a new mapping: {"variable":"username","column":"username","recorded_value":"recorded-demo-user"}. Column names must match the CSV header.'),
+        h("div", { class: "row" },
+          h("label", {}, "CSV sharing",
+            h("select", { id: "parameter-sharing" }, [
+              ["all_threads", "All threads"],
+              ["per_thread_group", "Per thread group"],
+              ["per_thread", "Per thread"],
+            ].map(([value, label]) => h("option", { value, selected: p.sharing_mode === value }, label)))),
+          h("label", { class: "check" }, h("input", { id: "parameter-recycle", type: "checkbox", checked: p.recycle }),
+            "Recycle data when CSV reaches end"))),
+      h("div", { class: "bulk" },
+        h("button", { class: "btn", onclick: saveParameters }, "Save parameter mappings"),
+        h("span", { class: "savestate", id: "parameterstate", role: "status" }),
+        h("div", { class: "formerror", id: "parametererror", role: "alert" })))
+      : null,
+
+    s.source === "har" ? h("div", { class: "section", id: "assertions" },
+      h("h2", {}, "Assertion builder"),
+      h("p", { class: "empty" }, "Assertions can apply to every request, one business function, or one request. Supported types: status_code, text_contains, text_not_contains, text_equals, text_matches, json_path, header_value, duration, and response_size."),
+      s.assertion_warnings.length ? s.assertion_warnings.map(warning => h("div", { class: "warn" }, warning)) : null,
+      h("label", {}, "Assertion rules (JSON)",
+        h("textarea", { id: "assertionjson", rows: Math.min(12, Math.max(5, s.assertions.length * 4)), spellcheck: "false" },
+          JSON.stringify(s.assertions, null, 2))),
+      h("small", {}, 'Example: {"scope":"request","request_index":0,"checks":[{"type":"json_path","path":"$.status","expected":"ok"}]}.'),
+      h("div", { class: "bulk" },
+        h("button", { class: "btn", onclick: saveAssertions }, "Save assertions"),
+        h("span", { class: "savestate", id: "assertionstate", role: "status" }),
+        h("div", { class: "formerror", id: "assertionerror", role: "alert" }))) : null,
+
+    s.source === "har" ? h("div", { class: "section", id: "validation" },
+      h("h2", {}, "HAR comparison validator"),
+      h("p", { class: "empty" }, "Compare kept HAR requests with the generated JMeter plan. Query values are redacted in the report; headers and body are compared without displaying their values."),
+      h("button", { class: "btn quiet", onclick: validateScript }, "Validate generated plan"),
+      state.validation ? h("div", { class: "validation-report" },
+        h("h3", { class: state.validation.status === "Fail" ? "formerror" : "allclear" },
+          `${state.validation.status} · ${fmt(state.validation.summary.requests_passed)}/${fmt(state.validation.summary.requests_checked)} requests passed`),
+        state.validation.issues.map(issue => h("div", { class: `warn ${issue.severity === "error" ? "critical" : ""}` },
+          issue.request_index == null ? issue.message : `Request ${issue.request_index + 1}: ${issue.message}`)),
+        state.validation.requests.map(result => h("details", { class: "validation-row" },
+          h("summary", {}, `${result.index + 1}. ${result.method} ${result.label}`),
+          h("div", {}, `Recorded: ${result.recorded_endpoint || "—"}`),
+          h("div", {}, `Generated: ${result.generated_endpoint || "missing"}`),
+          h("ul", {}, result.checks.map(check => h("li", {
+            class: check.status === "fail" ? "formerror" : "allclear",
+          }, `${check.status === "pass" ? "PASS" : "FAIL"} · ${check.field}: ${check.message}`)))))) : null,
+      h("span", { class: "savestate", id: "validationstate", role: "status" }),
+      h("div", { class: "formerror", id: "validationerror", role: "alert" })) : null,
+
+    s.source === "har" ? h("div", { class: "section", id: "debugresults" },
+      h("h2", {}, "Debug run and results"),
+      h("p", { class: "empty" }, "Run a sequential, low-load check (up to 5 users and 5 iterations). Debug results are kept separate from performance metrics. Sensitive headers and JSON fields are masked in the viewer; raw JTL and JMeter logs are available to authenticated users."),
+      h("div", { class: "exportbox" },
+        h("label", {}, "Users", h("input", { id: "debug-users", type: "number", min: 1, max: 5, value: 1 })),
+        h("label", {}, "Iterations", h("input", { id: "debug-loops", type: "number", min: 1, max: 5, value: 1 })),
+        h("button", { class: "btn", onclick: () => startDebugRun() }, "Run debug test"),
+        h("span", { class: "savestate", id: "debugstate", role: "status" })),
+      state.debugError ? h("div", { class: "formerror", id: "debugerror", role: "alert" }, state.debugError)
+        : h("div", { class: "formerror", id: "debugerror", role: "alert" }),
+      state.debugRuns.length ? h("label", {}, "Debug history",
+        h("select", { value: state.debugRun ? state.debugRun.id : "", onchange: (e) => loadDebugRun(e.target.value) },
+          state.debugRuns.map(run => h("option", { value: run.id, selected: state.debugRun && run.id === state.debugRun.id },
+            `${run.id} · ${run.status} · ${run.created_at}`)))) : h("p", { class: "empty" }, "No debug runs yet."),
+      state.debugRun ? h("div", { class: "debug-results" },
+        h("div", { class: "bulk" },
+          h("strong", {}, `${state.debugRun.status} · ${state.debugRun.summary
+            ? `${fmt(state.debugRun.summary.passed)} passed, ${fmt(state.debugRun.summary.failed)} failed, ${fmt(state.debugRun.summary.assertion_failures)} assertion failures`
+            : "collecting samples"}`),
+          state.debugRun.status !== "running" ? h("button", {
+            class: "btn quiet", onclick: () => startDebugRun(state.debugRun.id),
+          }, "Re-run debug") : null,
+          h("a", { class: "btn quiet", href: `/debug-runs/${state.debugRun.id}/results.jtl` }, "Raw JTL"),
+          h("a", { class: "btn quiet", href: `/debug-runs/${state.debugRun.id}/jmeter.log` }, "JMeter log")),
+        renderDebugDiagnosis(),
+        h("div", { class: "toolbar" },
+          h("label", {}, "Search sample bodies", h("input", {
+            type: "search", value: state.debugSearch, oninput: (e) => { state.debugSearch = e.target.value; renderScript(); },
+          })),
+          h("label", { class: "check" }, h("input", {
+            type: "checkbox", checked: state.debugFailedOnly,
+            onchange: (e) => { state.debugFailedOnly = e.target.checked; renderScript(); },
+          }), "Failed only")),
+        state.debugSamples.filter(sample => (!state.debugFailedOnly || !sample.success)
+          && (!state.debugSearch || JSON.stringify(sample).toLowerCase().includes(state.debugSearch.toLowerCase())))
+          .map(sample => h("details", { class: "validation-row", open: !sample.success },
+            h("summary", {}, `${sample.success ? "PASS" : "FAIL"} · ${sample.method} ${sample.url} · ${sample.timing.total_ms} ms`),
+            h("div", {}, `Status ${sample.response.status_code} · Connect ${sample.timing.connect_ms} ms · Latency ${sample.timing.latency_ms} ms`),
+            h("h4", {}, "Request headers"), h("pre", {}, sample.request.headers),
+            h("h4", {}, "Request body"), h("pre", {}, sample.request.body || "(empty)"),
+            h("h4", {}, "Response headers"), h("pre", {}, sample.response.headers),
+            h("h4", {}, "Response body"), h("pre", {}, sample.response.body || "(empty)"),
+            h("h4", {}, "Assertions"),
+            sample.assertions.length ? sample.assertions.map(assertion => h("div", {
+              class: assertion.passed ? "allclear" : "formerror",
+            }, `${assertion.passed ? "PASS" : "FAIL"} · ${assertion.name}${assertion.message ? `: ${assertion.message}` : ""}`))
+              : h("p", { class: "empty" }, sample.success ? "No assertion failures." : sample.failure || "Request failed."),
+            sample.variables.length ? h("div", {}, "Extracted variables (values masked): ",
+              sample.variables.map(variable => `${variable.name} from request ${variable.source_index + 1}; used by ${variable.targets.map(index => index + 1).join(", ")}`)) : null))) : null) : null,
 
     h("div", { class: "section" }, h("h2", {}, "Export"),
       h("div", { class: "exportbox" },

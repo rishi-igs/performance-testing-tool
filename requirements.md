@@ -289,7 +289,7 @@ By default, JMeter treats any response that arrives as a success. A server can r
 1. Auto-suggest a response code assertion for each request, based on the status in the HAR.
 2. Auto-suggest a text or JSON path assertion based on stable fields in the recorded response, such as a success flag or a known title.
 3. Allow assertions to be set globally, per transaction, or per request.
-4. Count failed assertions separately from HTTP errors in the results.
+4. Count failed assertion checks separately from HTTP failures in debug summaries and performance results.
 5. Warn when a request has no assertion at all.
 
 ```yaml
@@ -316,7 +316,7 @@ The tool should offer a lightweight debug run to validate the script before appl
 **Debug run behavior:**
 
 - Runs 1 virtual user for 1 iteration (configurable up to a small limit, for example 5 users)
-- Stores full request and response details for every sample
+- Captures full request and response data in the debug JTL; the dashboard sample API masks sensitive headers and JSON fields
 - Runs sequentially so the flow matches the recording
 - Is clearly labeled as a debug run and is excluded from performance metrics and baselines
 
@@ -330,7 +330,7 @@ The tool should offer a lightweight debug run to validate the script before appl
 - Pass or fail indicator per sample, with a "failed only" filter
 - Searchable text within bodies
 
-Full request and response storage should only be enabled for debug runs, never for large load tests, because of storage cost and sensitive data (see section 16).
+Full request and response capture is enabled only for debug runs, never for large load tests, because of storage cost and sensitive data (see section 16). Raw JTL and JMeter log downloads require API-key authentication when configured, but may contain unmasked sensitive values; no retention policy or at-rest encryption is currently implemented.
 
 ### 8.8 Failure Diagnosis and Re-run
 
@@ -482,17 +482,23 @@ performance-tool/
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
-| POST | `/scripts/import-har` | Upload a HAR file and return the request list |
+| POST | `/scripts/import-har?name=` | Upload a HAR file and return the request list |
 | PUT | `/scripts/{id}/filter` | Save include or exclude selections and rules |
-| GET | `/scripts/{id}/correlations` | List detected dynamic values |
-| PUT | `/scripts/{id}/parameters` | Save parameter and data source configuration |
+| GET | `/scripts/{id}` | Read request list, correlations, parameters, assertions and validation warnings |
+| PUT | `/scripts/{id}/parameters/csv` | Validate CSV headers and row count without retaining file contents |
+| PUT | `/scripts/{id}/parameters` | Save CSV parameter mappings and data source configuration |
 | POST | `/scripts/{id}/validate` | Run the HAR comparison validator |
 | PUT | `/scripts/{id}/assertions` | Save assertions |
 | GET | `/scripts/{id}/export-jmx` | Download the generated `.jmx` |
-| POST | `/scripts/{id}/debug-run` | Start a 1-user debug run |
-| GET | `/debug-runs/{run_id}/samples` | List samples with pass or fail status |
-| GET | `/debug-runs/{run_id}/samples/{n}` | Full request, response, and variables for one sample |
+| POST | `/debug-runs/scripts/{id}?users=1&loops=1` | Start a bounded debug run; send the CSV raw body when parameterized |
+| GET | `/debug-runs/scripts/{id}` | List debug-run history |
+| GET | `/debug-runs/{run_id}` | Read status, request counts, and assertion-failure count |
+| POST | `/debug-runs/{run_id}/rerun` | Re-run with the same limits; send CSV when parameterized |
+| GET | `/debug-runs/{run_id}/samples?failed_only=true&search=` | List, filter and search sanitized samples |
+| GET | `/debug-runs/{run_id}/samples/{n}` | Read one sanitized request/response sample |
 | GET | `/debug-runs/{run_id}/diagnosis` | Failure analysis and suggested fixes |
+| GET | `/debug-runs/{run_id}/results.jtl` | Download raw debug JTL (sensitive) |
+| GET | `/debug-runs/{run_id}/jmeter.log` | Download JMeter log |
 | POST | `/tests` | Create and start a performance test |
 | POST | `/tests/{id}/stop` | Stop a running test |
 | GET | `/tests/{id}/status` | Live status and metrics |
@@ -524,25 +530,37 @@ profile:
     users: 100
 ```
 
-Still to add in this phase: ramp-up profiles, spikes, soak, load ramp-down, pauses, and
-multiple test phases.
+Non-monotonic profiles are supported for spike, stress, soak, and multi-phase schedules.
+The existing fixed-user ramp-up remains supported. A future scheduler extension is still
+needed for true per-user pauses and smooth ramp-down curves.
 
 ### Phase 3: HAR Import, Script Preparation, and Debugging
 
 - 3A. Parse the HAR file and generate a basic JMeter plan.
 - 3B. Request filtering and review screen (8.3).
-- 3C. Dynamic value detection and correlation rules, with manual override (8.2).
-- 3D. Parameterization with CSV Data Set support (8.4).
-- 3E. HAR comparison validator (8.5).
-- 3F. Assertion builder (8.6).
-- 3G. Debug run mode and results viewer (8.7).
-- 3H. Failure diagnosis and one-click re-run (8.8).
+- 3C. Initial JSON response correlation is implemented: detect reused response values, substitute
+  JMeter variables in later requests, review/edit JSONPath extractors, and export JMeter JSON
+  Extractors without storing response bodies. Non-JSON extraction, cookie correlation and
+  broader correlation review remain.
+- 3D. Initial CSV parameterization is implemented: validate uploaded UTF-8 CSV metadata without
+  storing CSV contents, replace selected recorded request values with CSV-backed JMeter
+  variables, and export a CSV Data Set Config with recycling and sharing options. The generated
+  JMX user downloads the original CSV separately. Inline lists, generated values, and persistent
+  server-side run data are not implemented.
+- 3E. Initial HAR comparison validator is implemented: compare each kept HAR request with its
+  generated JMeter sampler for endpoint, method, headers, body, response-code assertion, and
+  order; report missing/disabled correlation sources, unknown variables, and likely unresolved
+  dynamic literals. Query values and request-body/header contents are not exposed in the report.
+  This validates generated structure only; it does not execute requests against the target.
+- 3F. Scoped assertion authoring and HAR-based status/selected JSON-field suggestions (8.6), implemented.
+- 3G. Bounded HAR debug runs, sanitized sample viewer, history and reruns (8.7), implemented.
+- 3H. Rule-based failure suggestions linked to the relevant editor (8.8), implemented.
 
-**Exit criteria:** an authenticated multi-step flow recorded from a real browser passes a debug run with all assertions green and no unresolved dynamic values.
+**Exit criteria:** an authenticated multi-step flow recorded from a real browser must pass a debug run with all assertions green and no unresolved dynamic values. This remains a manual acceptance check; local real-JMeter verification covers a two-request sample flow, not a production-authenticated browser recording.
 
 ### Phase 4: Dashboard
 
-Display test status, latency and throughput charts, errors, alerts, and comparisons between test runs. The debug results viewer from Phase 3G can be reused here.
+Display test status, latency and throughput charts, errors, alerts, and comparisons between test runs. The dashboard already displays live charts; the API now also exposes a baseline comparison endpoint. The debug results viewer from Phase 3G can be reused here. A dedicated comparison panel is still pending.
 
 ### Phase 5: Automated Analysis
 
@@ -554,7 +572,7 @@ Collect CPU and memory usage, database query metrics, and network metrics. Corre
 
 ### Phase 7: CI/CD Integration
 
-Run tests from GitHub Actions or GitLab CI, compare results with baselines, fail builds when performance thresholds are violated, and publish reports as artifacts.
+Run tests from GitHub Actions or GitLab CI, compare results with baselines, fail builds when performance thresholds are violated, and publish reports as artifacts. The CLI now accepts `--baseline` and returns a failing exit code for detected regressions; provider-specific workflow files and artifact upload remain pending.
 
 ### Phase 8: Distributed Testing
 
@@ -600,6 +618,10 @@ The last four-plus items allow end-to-end tests of correlation, parameterization
 - Offer HAR sanitization on upload (strip or replace credentials before storage).
 - Store CSV test data, especially credentials, in protected storage and never in source control.
 - Restrict debug runs to approved target environments, the same as full tests.
+
+**Current implementation gaps:** debug sample responses are sanitized in the viewer, but raw JTL
+and JMeter log downloads may expose credentials or personal data to anyone with API access. There
+is no role-based reveal flow, at-rest encryption, or retention/automatic-deletion policy yet.
 
 ## 17. Operational Requirements
 
