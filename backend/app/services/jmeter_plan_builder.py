@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
 from typing import Any, Iterable
 from urllib.parse import SplitResult, urlsplit
 
@@ -82,17 +83,6 @@ def _add_header_manager(parent_tree: ET.Element, headers: Iterable[tuple[str, st
         _prop(h, "stringProp", "Header.value", value)
 
 
-def _add_json_extractor(parent_tree: ET.Element, variable: str, expression: str) -> None:
-    extractor, _ = _element(
-        parent_tree, "JSONPostProcessor", "JSONPostProcessorGui", "JSONPostProcessor",
-        f"Extract {variable}",
-    )
-    _prop(extractor, "stringProp", "JSONPostProcessor.referenceNames", variable)
-    _prop(extractor, "stringProp", "JSONPostProcessor.jsonPathExprs", expression)
-    _prop(extractor, "stringProp", "JSONPostProcessor.match_numbers", "1")
-    _prop(extractor, "stringProp", "JSONPostProcessor.defaultValues", "NOT_FOUND")
-
-
 def _add_status_assertion(parent_tree: ET.Element, codes: Iterable[int], *, ignore_status: bool) -> None:
     """Response code must equal one of `codes`.
 
@@ -109,73 +99,12 @@ def _add_status_assertion(parent_tree: ET.Element, codes: Iterable[int], *, igno
     _prop(ra, "intProp", "Assertion.test_type", _EQUALS_OR)
 
 
-def _add_response_assertion(
-    parent_tree: ET.Element,
-    field: str,
-    value: str,
-    operator: str,
-    name: str,
-    *,
-    case_sensitive: bool = True,
-) -> None:
-    ra, _ = _element(parent_tree, "ResponseAssertion", "AssertionGui", "ResponseAssertion", name)
-    strings = ET.SubElement(ra, "collectionProp", {"name": "Asserion.test_strings"})
-    _prop(strings, "stringProp", value, value)
-    _prop(ra, "stringProp", "Assertion.custom_message", "")
-    _prop(ra, "stringProp", "Assertion.test_field", field)
-    _prop(ra, "boolProp", "Assertion.assume_success", False)
-    _prop(ra, "boolProp", "Assertion.case_sensitive", case_sensitive)
-    operators = {"contains": 2, "not_contains": 6, "equals": 8, "matches": 1}
-    _prop(ra, "intProp", "Assertion.test_type", operators[operator])
-
-
-def _add_assertion(parent_tree: ET.Element, check: dict[str, Any]) -> None:
-    kind = check["type"]
-    if kind == "status_code":
-        expected = check["expected"]
-        value = expected[0] + r"\d\d" if isinstance(expected, str) else str(expected)
-        operator = "matches" if isinstance(expected, str) else "equals"
-        _add_response_assertion(parent_tree, "Assertion.response_code", value, operator, "Expected response code")
-    elif kind in {"text_contains", "text_not_contains", "text_equals", "text_matches"}:
-        operators = {
-            "text_contains": "contains", "text_not_contains": "not_contains",
-            "text_equals": "equals", "text_matches": "matches",
-        }
-        _add_response_assertion(parent_tree, "Assertion.response_data", check["value"],
-                                operators[kind], "Response text assertion")
-    elif kind == "header_value":
-        _add_response_assertion(parent_tree, "Assertion.response_headers", f"{check['name']}: {check['value']}",
-                                check["operator"], "Response header assertion", case_sensitive=False)
-    elif kind == "json_path":
-        assertion, _ = _element(parent_tree, "JSONPathAssertion", "JSONPathAssertionGui",
-                                "JSONPathAssertion", "JSONPath assertion")
-        _prop(assertion, "stringProp", "JSON_PATH", check["path"])
-        _prop(assertion, "stringProp", "EXPECTED_VALUE", check.get("expected") or "")
-        _prop(assertion, "boolProp", "JSONVALIDATION", check.get("expected") is not None)
-        _prop(assertion, "boolProp", "EXPECT_NULL", False)
-        _prop(assertion, "boolProp", "INVERT", not check.get("exists", True))
-        _prop(assertion, "boolProp", "ISREGEX", False)
-    elif kind == "duration":
-        assertion, _ = _element(parent_tree, "DurationAssertion", "DurationAssertionGui",
-                                "DurationAssertion", "Maximum response duration")
-        _prop(assertion, "stringProp", "DurationAssertion.duration", check["max_ms"])
-    elif kind == "response_size":
-        for name, operator, value in (
-            ("Minimum response size", "5", check["min_bytes"]),
-            ("Maximum response size", "6", check["max_bytes"]),
-        ):
-            if value is None or (operator == ">=" and value == 0):
-                continue
-            assertion, _ = _element(parent_tree, "SizeAssertion", "SizeAssertionGui",
-                                    "SizeAssertion", name)
-            _prop(assertion, "stringProp", "SizeAssertion.size", value)
-            _prop(assertion, "stringProp", "SizeAssertion.operator", operator)
-
-
 def add_transaction_controller(parent_tree: ET.Element, name: str) -> ET.Element:
     """Append a Transaction Controller (one business function); return its child hashTree."""
     tc, tc_tree = _element(parent_tree, "TransactionController", "TransactionControllerGui", "TransactionController", name)
     _prop(tc, "boolProp", "TransactionController.parent", False)
+    # Without this property JMeter counts timer waits (pacing, goal throttling) as response time.
+    _prop(tc, "boolProp", "TransactionController.includeTimers", False)
     return tc_tree
 
 
@@ -214,7 +143,8 @@ def _add_thread_group(
     )
     if config.headers:
         _add_header_manager(sampler_tree, config.headers.items())
-    _add_status_assertion(sampler_tree, config.expected_status_codes, ignore_status=False)
+    # "Ignore status" so an expected 4xx (e.g. 404) passes; any code not listed still fails.
+    _add_status_assertion(sampler_tree, config.expected_status_codes, ignore_status=True)
 
     if config.think_time_ms:
         timer, _ = _element(sampler_tree, "ConstantTimer", "ConstantTimerGui", "ConstantTimer", "Think time")
@@ -224,12 +154,12 @@ def _add_thread_group(
 def build_plan(config: LoadTestConfig) -> str:
     url = urlsplit(config.target_url)
     port = url.port or (443 if url.scheme == "https" else 80)
-    root, plan_tree = _test_plan(config.name)
+    root, _, plan_tree = _test_plan(config.name)
 
     sampler_name = f"{config.method} {(url.path or '/') + (f'?{url.query}' if url.query else '')}"
     if config.profile is None:
         cohorts = [(config.users, "", config.duration_seconds, "Virtual users", config.ramp_up_seconds)]
-    elif config.test_type == "load":
+    else:
         cohorts = []
         previous_users = 0
         for index, step in enumerate(config.profile):
@@ -241,19 +171,6 @@ def build_plan(config: LoadTestConfig) -> str:
                 0,
             ))
             previous_users = step.users
-    else:
-        cohorts = [
-            (
-                step.users,
-                step.time_seconds,
-                (config.profile[index + 1].time_seconds
-                 if index + 1 < len(config.profile) else config.duration_seconds)
-                - step.time_seconds,
-                f"Phase {index + 1}: {step.users} users",
-                0,
-            )
-            for index, step in enumerate(config.profile)
-        ]
 
     for users, delay, duration, group_name, ramp_time in cohorts:
         _add_thread_group(
@@ -272,8 +189,11 @@ def build_plan(config: LoadTestConfig) -> str:
     return serialize(root)
 
 
-def _test_plan(name: str, variables: Iterable[str] = ()) -> tuple[ET.Element, ET.Element]:
-    """Root element and Test Plan; `variables` become empty User Defined Variables. Returns (root, plan hashTree)."""
+def _test_plan(name: str, variables: Iterable[str] = ()) -> tuple[ET.Element, ET.Element, ET.Element]:
+    """Root element and Test Plan; `variables` become empty User Defined Variables.
+
+    Returns (root, Test Plan element, its hashTree).
+    """
     root = ET.Element("jmeterTestPlan", {"version": "1.2", "properties": "5.0", "jmeter": JMETER_VERSION})
     top = ET.SubElement(root, "hashTree")
     plan, plan_tree = _element(top, "TestPlan", "TestPlanGui", "TestPlan", name)
@@ -287,11 +207,28 @@ def _test_plan(name: str, variables: Iterable[str] = ()) -> tuple[ET.Element, ET
     })
     coll = ET.SubElement(args, "collectionProp", {"name": "Arguments.arguments"})
     for var in variables:
-        arg = ET.SubElement(coll, "elementProp", {"name": var, "elementType": "Argument"})
-        _prop(arg, "stringProp", "Argument.name", var)
-        _prop(arg, "stringProp", "Argument.value", "")
-        _prop(arg, "stringProp", "Argument.metadata", "=")
-    return root, plan_tree
+        add_variable(plan, var, "")
+    return root, plan, plan_tree
+
+
+def add_variable(plan: ET.Element, name: str, value: str) -> None:
+    """Add (or overwrite) a User Defined Variable on the Test Plan."""
+    coll = plan.find("elementProp[@name='TestPlan.user_defined_variables']/collectionProp")
+    if coll is None:
+        args = ET.SubElement(plan, "elementProp", {
+            "name": "TestPlan.user_defined_variables", "elementType": "Arguments",
+            "guiclass": "ArgumentsPanel", "testclass": "Arguments",
+            "testname": "User Defined Variables", "enabled": "true",
+        })
+        coll = ET.SubElement(args, "collectionProp", {"name": "Arguments.arguments"})
+    for existing in coll.findall("elementProp"):
+        if existing.get("name") == name:
+            existing.find("stringProp[@name='Argument.value']").text = value
+            return
+    arg = ET.SubElement(coll, "elementProp", {"name": name, "elementType": "Argument"})
+    _prop(arg, "stringProp", "Argument.name", name)
+    _prop(arg, "stringProp", "Argument.value", value)
+    _prop(arg, "stringProp", "Argument.metadata", "=")
 
 
 def serialize(root: ET.Element) -> str:
@@ -331,6 +268,20 @@ _VIEW_RESULTS_FIELDS = [
 ]
 
 
+@dataclass
+class PlanTree:
+    """A plan being built, with handles to the parts a script's design changes."""
+
+    root: ET.Element
+    plan: ET.Element
+    plan_tree: ET.Element
+    thread_groups: list[tuple[ET.Element, ET.Element]] = field(default_factory=list)
+    # item index -> (sampler, its hashTree, the hashTree holding the sampler)
+    samplers: dict[int, tuple[ET.Element, ET.Element, ET.Element]] = field(default_factory=dict)
+    pauses_ms: list[float | None] = field(default_factory=list)   # recorded pause before each transaction
+    cookie_manager: ET.Element | None = None
+
+
 def build_recorded_plan(
     name: str,
     transactions: list[tuple[str, list[dict[str, Any]]]],
@@ -340,11 +291,36 @@ def build_recorded_plan(
     ramp_up_seconds: int = 0,
     loops: int = 1,
     timeout_ms: int = 30_000,
-    correlations: Iterable[dict[str, Any]] = (),
-    parameterization: dict[str, Any] | None = None,
-    csv_headers: Iterable[str] = (),
-    assertions: Iterable[dict[str, Any]] | None = None,
 ) -> str:
+    return serialize(recorded_tree(name, transactions, variables=variables, users=users,
+                                   ramp_up_seconds=ramp_up_seconds, loops=loops, timeout_ms=timeout_ms).root)
+
+
+def _recorded_pauses(transactions: list[tuple[str, list[dict[str, Any]]]]) -> list[float | None]:
+    """Recorded idle time between the end of one transaction and the start of the next."""
+    pauses: list[float | None] = []
+    previous_end = None
+    for _, requests in transactions:
+        timed = [r for r in requests if r.get("started_ms") is not None]
+        start = min((r["started_ms"] for r in timed), default=None)
+        pauses.append(max(0.0, start - previous_end) if start is not None and previous_end is not None else None)
+        if timed:
+            previous_end = max(r["started_ms"] + (r.get("time_ms") or 0) for r in timed)
+    return pauses
+
+
+def recorded_tree(
+    name: str,
+    transactions: list[tuple[str, list[dict[str, Any]]]],
+    *,
+    variables: Iterable[str] = (),
+    users: int = 1,
+    ramp_up_seconds: int = 0,
+    loops: int = 1,
+    timeout_ms: int = 30_000,
+    clear_cookies: bool = True,
+    status_checks: bool = True,
+) -> PlanTree:
     """Plan for an imported recording: one Transaction Controller per business function.
 
     Test Plan
@@ -356,7 +332,8 @@ def build_recorded_plan(
             Response Assertion: recorded status code                          (assertion)
       View Results Tree, disabled so it costs nothing under load              (listener)
     """
-    root, plan_tree = _test_plan(name, variables)
+    root, plan, plan_tree = _test_plan(name, variables)
+    tree = PlanTree(root=root, plan=plan, plan_tree=plan_tree, pauses_ms=_recorded_pauses(transactions))
 
     defaults, _ = _element(plan_tree, "ConfigTestElement", "HttpDefaultsGui", "ConfigTestElement", "HTTP Request Defaults")
     dargs = ET.SubElement(defaults, "elementProp", {
@@ -369,17 +346,13 @@ def build_recorded_plan(
 
     cookies, _ = _element(plan_tree, "CookieManager", "CookiePanel", "CookieManager", "HTTP Cookie Manager")
     ET.SubElement(cookies, "collectionProp", {"name": "CookieManager.cookies"})
-    _prop(cookies, "boolProp", "CookieManager.clearEachIteration", True)   # each iteration is a new visitor
+    _prop(cookies, "boolProp", "CookieManager.clearEachIteration", clear_cookies)   # True: each iteration is a new visitor
+    tree.cookie_manager = cookies
 
     common = _common_headers([r for _, requests in transactions for r in requests])
     if common:
         _add_header_manager(plan_tree, common, "Common headers")
     common_keys = {(n.lower(), v) for n, v in common}
-    extractors: dict[int, list[dict[str, Any]]] = {}
-    for rule in correlations:
-        if rule.get("enabled", True):
-            extractors.setdefault(rule["source_index"], []).append(rule)
-    assertion_rules = list(assertions) if assertions is not None else None
 
     tg, tg_tree = _element(plan_tree, "ThreadGroup", "ThreadGroupGui", "ThreadGroup", "Recorded flow")
     _prop(tg, "stringProp", "ThreadGroup.on_sample_error", "continue")
@@ -395,32 +368,8 @@ def build_recorded_plan(
     _prop(tg, "boolProp", "ThreadGroup.scheduler", False)
     _prop(tg, "stringProp", "ThreadGroup.duration", "")
     _prop(tg, "stringProp", "ThreadGroup.delay", "")
-    _prop(tg, "boolProp", "ThreadGroup.same_user_on_next_iteration", True)
-
-    parameterization = parameterization or {}
-    headers = list(csv_headers)
-    if parameterization.get("parameters"):
-        dataset, _ = _element(
-            tg_tree, "CSVDataSet", "TestBeanGUI", "CSVDataSet", "CSV Data Set Config",
-        )
-        _prop(dataset, "stringProp", "filename", "${__P(perf.data.file,parameters.csv)}")
-        _prop(dataset, "stringProp", "fileEncoding", "UTF-8")
-        _prop(dataset, "stringProp", "variableNames", ",".join(headers))
-        _prop(dataset, "stringProp", "delimiter", ",")
-        _prop(dataset, "boolProp", "quotedData", True)
-        _prop(dataset, "boolProp", "recycle", parameterization.get("recycle", True))
-        _prop(dataset, "boolProp", "stopThread", False)
-        sharing_modes = {
-            "all_threads": "shareMode.all",
-            "per_thread_group": "shareMode.group",
-            "per_thread": "shareMode.thread",
-        }
-        _prop(
-            dataset, "stringProp", "shareMode",
-            sharing_modes[parameterization.get("sharing_mode", "all_threads")],
-        )
-        _prop(dataset, "boolProp", "ignoreFirstLine", False)
-        _prop(dataset, "boolProp", "allowQuotedData", True)
+    _prop(tg, "boolProp", "ThreadGroup.same_user_on_next_iteration", not clear_cookies)
+    tree.thread_groups.append((tg, tg_tree))
 
     for number, (tx_name, requests) in enumerate(transactions, 1):
         tc_tree = add_transaction_controller(tg_tree, f"{number:02d} {tx_name}")
@@ -431,24 +380,12 @@ def build_recorded_plan(
                 body=r["body"], follow_redirects=False,
                 content_encoding="UTF-8" if r["body"] is not None else None,
             )
+            tree.samplers[r["index"]] = (tc_tree[-2], sampler_tree, tc_tree)
             own = [(n, v) for n, v in r["headers"] if (n.lower(), v) not in common_keys]
             if own:
                 _add_header_manager(sampler_tree, own)
-            applicable = []
-            if assertion_rules is not None:
-                applicable = [
-                    rule for rule in assertion_rules
-                    if (rule["scope"] == "global"
-                        or (rule["scope"] == "transaction" and rule["transaction"] == tx_name)
-                        or (rule["scope"] == "request" and rule["request_index"] == r["index"]))
-                ]
-            if assertion_rules is None and r.get("status"):
+            if r.get("status") and status_checks:
                 _add_status_assertion(sampler_tree, [r["status"]], ignore_status=True)
-            for rule in applicable:
-                for check in rule["checks"]:
-                    _add_assertion(sampler_tree, check)
-            for rule in extractors.get(r["index"], []):
-                _add_json_extractor(sampler_tree, rule["variable"], rule["expression"])
 
     vrt, _ = _element(plan_tree, "ResultCollector", "ViewResultsFullVisualizer", "ResultCollector", "View Results Tree")
     vrt.set("enabled", "false")
@@ -456,11 +393,10 @@ def build_recorded_plan(
     obj = ET.SubElement(vrt, "objProp")
     ET.SubElement(obj, "name").text = "saveConfig"
     value = ET.SubElement(obj, "value", {"class": "SampleSaveConfiguration"})
-    for field, flag in _VIEW_RESULTS_FIELDS:
-        ET.SubElement(value, field).text = flag
+    for save_field, flag in _VIEW_RESULTS_FIELDS:
+        ET.SubElement(value, save_field).text = flag
     _prop(vrt, "stringProp", "filename", "")
-
-    return serialize(root)
+    return tree
 
 
 def jmeter_properties() -> list[str]:

@@ -16,46 +16,13 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator
 from urllib.parse import urlsplit
 
+from . import xmlsafe
 from .har_parser import MAX_REQUESTS, ImportFailed
-from .jmeter_plan_builder import add_transaction_controller, serialize
+from .jmeter_plan_builder import PlanTree, add_transaction_controller, serialize
 
 GROUPING = {"TransactionController", "GenericController", "RecordingController"}
-_UNSAFE_XML = re.compile(rb"<!\s*(doctype|entity)", re.IGNORECASE)
 _EXPORT_NUMBER = re.compile(r"^\d{2,} (?=\S)")     # "01 Login" as written by rebuild()/build_recorded_plan()
-
-# JMeter writes control characters from recorded data (binary bodies, for example) as references
-# such as &#x10;. XML 1.0 forbids them, so Python's parser rejects the file although JMeter reads
-# it. Before parsing, each one becomes a private-use marker that ElementTree accepts; the export
-# turns the markers back into the original references.
-_CHAR_REF = re.compile(rb"&#(?:x([0-9a-fA-F]+)|([0-9]+));")
-_MARK_OPEN, _MARK_CLOSE = "", ""
-_MARKED = re.compile(f"{_MARK_OPEN}([0-9a-f]+){_MARK_CLOSE}")
-_MARKERS_IN_FILE = re.compile(rb"\xee\x80[\x80\x81]|&#(x0*e00[01]|5734[45]);", re.IGNORECASE)
-
-
-def _xml10_char(cp: int) -> bool:
-    return cp in (0x9, 0xA, 0xD) or 0x20 <= cp <= 0xD7FF or 0xE000 <= cp <= 0xFFFD or 0x10000 <= cp <= 0x10FFFF
-
-
-def _mark_invalid_refs(raw: bytes) -> bytes:
-    def mark(m: re.Match[bytes]) -> bytes:
-        cp = int(m.group(1), 16) if m.group(1) else int(m.group(2))
-        return m.group(0) if _xml10_char(cp) else f"&#xE000;{cp:x}&#xE001;".encode()
-
-    marked = _CHAR_REF.sub(mark, raw)
-    if marked != raw and _MARKERS_IN_FILE.search(raw):
-        raise ImportFailed("The .jmx file uses the private-use characters U+E000/U+E001, which this tool "
-                           "needs internally; it cannot be imported.")
-    return marked
-
-
-def _restore_refs(xml: str) -> str:
-    return _MARKED.sub(lambda m: f"&#x{m.group(1)};", xml)
-
-
-def _visible(text: str) -> str:
-    """Show a marked control character as \\x10 in labels and URLs."""
-    return _MARKED.sub(lambda m: f"\\x{int(m.group(1), 16):02x}", text)
+_visible = xmlsafe.visible
 
 Pair = tuple[ET.Element, "ET.Element | None"]
 
@@ -123,6 +90,8 @@ class _Item:
 class _Plan:
     root: ET.Element
     name: str
+    plan_el: ET.Element
+    plan_tree: ET.Element
     thread_groups: list[tuple[ET.Element, ET.Element]] = field(default_factory=list)
     tg_kept: list[list[Pair]] = field(default_factory=list)
     defaults: list[dict[str, str]] = field(default_factory=list)
@@ -131,10 +100,10 @@ class _Plan:
 
 
 def _load(raw: bytes) -> _Plan:
-    if _UNSAFE_XML.search(raw):
-        raise ImportFailed("The .jmx file contains a DOCTYPE or entity declaration, which is not allowed.")
     try:
-        root = ET.fromstring(_mark_invalid_refs(raw))
+        root = xmlsafe.parse(raw)
+    except xmlsafe.UnsafeXml as exc:
+        raise ImportFailed(str(exc).replace("The file", "The .jmx file", 1)) from exc
     except ET.ParseError as exc:
         raise ImportFailed(f"This is not a valid .jmx file: {exc}.") from exc
     if root.tag != "jmeterTestPlan":
@@ -144,7 +113,7 @@ def _load(raw: bytes) -> _Plan:
     if first is None or first[0].tag != "TestPlan" or first[1] is None:
         raise ImportFailed("The .jmx file has no Test Plan.")
     plan_el, plan_tree = first
-    plan = _Plan(root=root, name=plan_el.get("testname") or "Imported test plan")
+    plan = _Plan(root=root, name=plan_el.get("testname") or "Imported test plan", plan_el=plan_el, plan_tree=plan_tree)
     plan_defaults = _http_defaults(plan_tree)
 
     def walk(tree: ET.Element, tg: int, chain: list[int], disabled: bool) -> list[Pair]:
@@ -215,7 +184,8 @@ def parse_jmx(raw: bytes) -> dict[str, Any]:
         raise ImportFailed("The .jmx file has no samplers to import.")
     items = [_describe(plan, item, i) for i, item in enumerate(plan.items)]
 
-    warnings = []
+    warnings = ["A .jmx file holds the requests but not what the server answered, so dynamic values cannot be "
+                "traced at import. On the Correlation tab, Correlate automatically replays the script and finds them."]
     blocks = sum(1 for i in items if i["note"])
     if blocks:
         warnings.append(f"{blocks} logic controller(s) (If, Loop, While, ...) are kept as single blocks; "
@@ -226,16 +196,25 @@ def parse_jmx(raw: bytes) -> dict[str, Any]:
     if any(c.scoped for c in plan.containers):
         warnings.append("Elements placed inside controllers (for example timers or header managers) move "
                         "with that controller's requests into the new Transaction Controllers.")
-    return {"name": plan.name, "items": items, "warnings": warnings, "variables": []}
+    return {"name": plan.name, "items": items, "warnings": warnings, "variables": [],
+            "design": {}, "suggestions": {}}
 
 
 def rebuild(raw: bytes, transactions: list[dict[str, Any]]) -> str:
+    """Re-create the plan with one Transaction Controller per transaction (see rebuild_tree)."""
+    return xmlsafe.restore(serialize(rebuild_tree(raw, transactions).root))
+
+
+def rebuild_tree(raw: bytes, transactions: list[dict[str, Any]]) -> PlanTree:
     """Re-create the plan with one Transaction Controller per transaction.
 
     `transactions`: [{"thread_group", "number", "name", "items": [item index, ...]}] in run order.
-    Items not listed are left out.
+    Items not listed are left out. Text keeps xmlsafe markers; pass the serialized XML through
+    xmlsafe.restore().
     """
     plan = _load(raw)
+    tree = PlanTree(root=plan.root, plan=plan.plan_el, plan_tree=plan.plan_tree,
+                    thread_groups=list(plan.thread_groups))
     by_group: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for tx in transactions:
         by_group[tx["thread_group"]].append(tx)
@@ -256,5 +235,8 @@ def rebuild(raw: bytes, transactions: list[dict[str, Any]]) -> str:
                         for el, sub in plan.containers[cid].scoped:
                             tc_tree.extend([copy.deepcopy(el), copy.deepcopy(sub) if sub is not None else ET.Element("hashTree")])
                 item.el.set("enabled", "true")    # the user chose to keep it
-                tc_tree.extend([item.el, item.sub if item.sub is not None else ET.Element("hashTree")])
-    return _restore_refs(serialize(plan.root))
+                sub = item.sub if item.sub is not None else ET.Element("hashTree")
+                tc_tree.extend([item.el, sub])
+                if item.el.tag in ("HTTPSamplerProxy", "HTTPSampler"):
+                    tree.samplers[index] = (item.el, sub, tc_tree)
+    return tree

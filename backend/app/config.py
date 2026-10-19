@@ -29,6 +29,10 @@ class Settings:
     max_duration_seconds: int
     max_concurrent_tests: int
     max_upload_bytes: int = 50 * 1024 * 1024
+    generator_data_dir: str = ""            # where data files are copied on the load generators
+    rmi_ssl_disable: bool = False           # distributed JMeter without the RMI keystore
+    secure_cookies: bool = False            # mark the session cookie Secure (on behind an HTTPS proxy)
+    scheduler_interval_seconds: int = 15    # how often scheduled runs are checked; 0 turns the scheduler off
 
     @property
     def db_path(self) -> Path:
@@ -56,4 +60,8 @@ def load_settings() -> Settings:
         max_duration_seconds=_int("MAX_DURATION_SECONDS", 3600),
         max_concurrent_tests=_int("MAX_CONCURRENT_TESTS", 2),
         max_upload_bytes=_int("MAX_UPLOAD_MB", 50) * 1024 * 1024,
+        generator_data_dir=os.environ.get("GENERATOR_DATA_DIR", "").strip(),
+        rmi_ssl_disable=_bool("JMETER_RMI_SSL_DISABLE", False),
+        secure_cookies=_bool("SECURE_COOKIES", False),
+        scheduler_interval_seconds=_int("SCHEDULER_INTERVAL_SECONDS", 15),
     )

@@ -1,9 +1,12 @@
-"""Models for imported scripts (HAR or JMX): filter rules, edits and export options."""
+"""Models for imported scripts (HAR or JMX): filter rules, edits, design and export options."""
 from __future__ import annotations
 
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+VarName = Annotated[str, Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")]
+FileName = Annotated[str, Field(pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,79}\.(csv|txt)$")]
 
 # Requirements 8.3 defaults, plus the static types JMeter's own recorder template excludes.
 DEFAULT_EXTENSIONS = [
@@ -88,137 +91,208 @@ class ScriptUpdate(BaseModel):
     rules: FilterRules | None = None
 
 
+# ---- Script design: what VuGen calls correlation, parameters, checks and run-time settings ----
+
 class CorrelationRule(BaseModel):
+    """Extract a value from one response into ${variable} (like LoadRunner's web_reg_save_param)."""
+
     model_config = ConfigDict(extra="forbid")
 
-    source_index: int = Field(ge=0)
-    target_indices: list[int] = Field(min_length=1, max_length=10_000)
-    variable: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
-    extractor: Literal["json"] = "json"
-    expression: str = Field(min_length=1, max_length=500)
-    enabled: bool = True
+    id: str | None = None
+    variable: VarName
+    source: int = Field(ge=0, description="index of the request whose response holds the value")
+    extractor: Literal["json", "regex", "boundary"]
+    expression: str = Field(min_length=1, max_length=2000, description="JSON path, regular expression or left boundary")
+    right: str | None = Field(default=None, max_length=500, description="right boundary (boundary extractor)")
+    scope: Literal["body", "headers"] = "body"
+    match: int = Field(1, ge=0, le=1000, description="1 = first match, 0 = random")
+    replace: str | None = Field(default=None, max_length=10_000,
+                                description="recorded text to replace with ${variable} in later requests")
+    origin: Literal["auto", "manual"] = "manual"
+    preview: str | None = None
+    used_in: list[int] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check(self) -> "CorrelationRule":
+        if self.extractor == "boundary" and not self.right:
+            raise ValueError("a boundary extractor needs a right boundary")
+        if self.extractor == "regex" and "(" not in self.expression:
+            raise ValueError("the regular expression needs a group, for example token=(\\w+)")
+        if self.extractor == "json" and not self.expression.startswith("$"):
+            raise ValueError("a JSON path starts with $, for example $.token")
+        if self.extractor == "json" and self.scope != "body":
+            raise ValueError("JSON paths read the response body")
+        return self
 
 
-class CorrelationsUpdate(BaseModel):
+class Parameter(BaseModel):
+    """Test data generated per user or per use (like LoadRunner parameter types)."""
+
     model_config = ConfigDict(extra="forbid")
 
-    correlations: list[CorrelationRule] = Field(default_factory=list, max_length=200)
+    name: VarName
+    type: Literal["list", "random_number", "unique_number", "uuid", "date", "random_string"]
+    values: list[str] = Field(default_factory=list, max_length=100_000)
+    selection: Literal["sequential", "random"] = "sequential"
+    minimum: int = 1
+    maximum: int = 1000
+    start: int = 1
+    increment: int = 1
+    per_user: bool = False
+    format: str = Field("", max_length=100, description="Java date format, e.g. yyyy-MM-dd")
+    offset_days: int = Field(0, ge=-36_500, le=36_500)
+    length: int = Field(10, ge=1, le=1000)
+    update: Literal["iteration", "occurrence"] = "iteration"
 
-    @field_validator("correlations")
-    @classmethod
-    def _unique_variables(cls, rules: list[CorrelationRule]) -> list[CorrelationRule]:
-        variables = [rule.variable for rule in rules]
-        if len(variables) != len(set(variables)):
-            raise ValueError("correlation variable names must be unique")
-        return rules
+    @model_validator(mode="after")
+    def _check(self) -> "Parameter":
+        if self.type == "list" and not self.values:
+            raise ValueError(f"parameter {self.name}: a list needs at least one value")
+        if self.type == "list" and any("\n" in v or "\r" in v for v in self.values):
+            raise ValueError(f"parameter {self.name}: list values must be single lines")
+        if self.type == "random_number" and self.minimum > self.maximum:
+            raise ValueError(f"parameter {self.name}: minimum is larger than maximum")
+        if self.type == "date" and not self.format:
+            self.format = "yyyy-MM-dd"
+        return self
 
 
-class ParameterRule(BaseModel):
+class DataFile(BaseModel):
+    """A CSV file of test data; each column becomes a variable (CSV Data Set Config)."""
+
     model_config = ConfigDict(extra="forbid")
 
-    variable: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
-    column: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
-    recorded_value: str | None = Field(default=None, min_length=1, max_length=100_000)
-
-
-class ParameterizationUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    parameters: list[ParameterRule] = Field(default_factory=list, max_length=200)
+    name: FileName
+    columns: list[VarName] = Field(min_length=1, max_length=100)
+    sharing: Literal["all", "group", "user"] = "all"
     recycle: bool = True
-    sharing_mode: Literal["all_threads", "per_thread_group", "per_thread"] = "all_threads"
-
-    @field_validator("parameters")
-    @classmethod
-    def _unique_parameters(cls, rules: list[ParameterRule]) -> list[ParameterRule]:
-        variables = [rule.variable for rule in rules]
-        if len(variables) != len(set(variables)):
-            raise ValueError("parameter variable names must be unique")
-        columns = [rule.column for rule in rules]
-        if len(columns) != len(set(columns)):
-            raise ValueError("each CSV column can be assigned to only one variable")
-        return rules
+    stop_at_end: bool = False
+    first_line_header: bool = True
+    rows: int = 0
 
 
-class StatusCodeCheck(BaseModel):
+class Replacement(BaseModel):
+    """Replace recorded text with ${variable} in every request (LoadRunner's "replace with parameter")."""
+
     model_config = ConfigDict(extra="forbid")
-    type: Literal["status_code"]
-    expected: int | Literal["2xx", "3xx", "4xx", "5xx"]
+
+    find: str = Field(min_length=1, max_length=10_000)
+    variable: VarName
 
 
-class TextCheck(BaseModel):
+class Check(BaseModel):
+    """A content check on one request or on every request (like LoadRunner's web_reg_find)."""
+
     model_config = ConfigDict(extra="forbid")
-    type: Literal["text_contains", "text_not_contains", "text_equals", "text_matches"]
-    value: str = Field(min_length=1, max_length=10_000)
 
-
-class JsonPathCheck(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    type: Literal["json_path"]
-    path: str = Field(min_length=1, max_length=500)
-    expected: str | None = Field(default=None, max_length=10_000)
-    exists: bool = True
-
-
-class HeaderCheck(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    type: Literal["header_value"]
-    name: str = Field(min_length=1, max_length=256)
-    value: str = Field(min_length=1, max_length=10_000)
-    operator: Literal["contains", "equals", "matches"] = "contains"
-
-
-class DurationCheck(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    type: Literal["duration"]
-    max_ms: int = Field(gt=0, le=3_600_000)
-
-
-class ResponseSizeCheck(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    type: Literal["response_size"]
-    min_bytes: int = Field(default=0, ge=0)
-    max_bytes: int | None = Field(default=None, ge=0)
+    id: str | None = None
+    item: int | None = Field(default=None, ge=0, description="request index; empty = every request")
+    type: Literal["text", "not_text", "regex", "json_path", "header", "duration", "size_max"]
+    value: str | None = Field(default=None, max_length=5000)
+    path: str | None = Field(default=None, max_length=500)
+    expected: str | None = Field(default=None, max_length=5000)
+    limit: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
-    def _valid_range(self):
-        if self.max_bytes is not None and self.max_bytes < self.min_bytes:
-            raise ValueError("max_bytes must be greater than or equal to min_bytes")
+    def _check(self) -> "Check":
+        needs = {"text": "value", "not_text": "value", "regex": "value", "header": "value",
+                 "json_path": "path", "duration": "limit", "size_max": "limit"}[self.type]
+        if getattr(self, needs) in (None, ""):
+            raise ValueError(f"a {self.type} check needs {needs}")
+        if self.type == "json_path" and not (self.path or "").startswith("$"):
+            raise ValueError("a JSON path starts with $")
         return self
 
 
-AssertionCheck = Annotated[
-    StatusCodeCheck | TextCheck | JsonPathCheck | HeaderCheck | DurationCheck | ResponseSizeCheck,
-    Field(discriminator="type"),
-]
-
-
-class AssertionRule(BaseModel):
+class ThinkTime(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    scope: Literal["global", "transaction", "request"]
-    request_index: int | None = Field(default=None, ge=0)
-    transaction: str | None = Field(default=None, min_length=1, max_length=80)
-    checks: list[AssertionCheck] = Field(min_length=1, max_length=50)
+
+    mode: Literal["recorded", "ignore", "fixed", "random"] = "recorded"
+    multiplier: float = Field(1.0, ge=0, le=10)
+    seconds: float = Field(1.0, ge=0, le=3600)
+    minimum: float = Field(1.0, ge=0, le=3600)
+    maximum: float = Field(3.0, ge=0, le=3600)
+    cap_seconds: float = Field(30.0, ge=0, le=3600, description="longest recorded pause replayed")
 
     @model_validator(mode="after")
-    def _valid_scope(self):
-        if self.scope == "request" and self.request_index is None:
-            raise ValueError("request_index is required for request-scoped assertions")
-        if self.scope == "transaction" and not self.transaction:
-            raise ValueError("transaction is required for transaction-scoped assertions")
-        if self.scope == "global" and (self.request_index is not None or self.transaction is not None):
-            raise ValueError("global assertions cannot specify a request or transaction")
-        if self.scope == "request" and self.transaction is not None:
-            raise ValueError("request-scoped assertions cannot specify a transaction")
+    def _check(self) -> "ThinkTime":
+        if self.minimum > self.maximum:
+            raise ValueError("think time minimum is larger than maximum")
         return self
 
 
-class AssertionsUpdate(BaseModel):
+class Pacing(BaseModel):
+    """When each new iteration starts (LoadRunner run-time setting "Pacing")."""
+
     model_config = ConfigDict(extra="forbid")
-    assertions: list[AssertionRule] = Field(default_factory=list, max_length=10_000)
+
+    mode: Literal["none", "interval", "after_fixed", "after_random"] = "none"
+    seconds: float = Field(10.0, gt=0, le=86_400)
+    minimum: float = Field(5.0, ge=0, le=86_400)
+    maximum: float = Field(15.0, ge=0, le=86_400)
+
+    @model_validator(mode="after")
+    def _check(self) -> "Pacing":
+        if self.minimum > self.maximum:
+            raise ValueError("pacing minimum is larger than maximum")
+        return self
 
 
-class DebugRunRequest(BaseModel):
+class RuntimeSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    users: int = Field(default=1, ge=1, le=5)
-    loops: int = Field(default=1, ge=1, le=5)
+
+    think_time: ThinkTime = Field(default_factory=ThinkTime)
+    pacing: Pacing = Field(default_factory=Pacing)
+    on_error: Literal["continue", "next_iteration", "stop_user"] = "continue"
+    new_user_each_iteration: bool = True
+    timeout_seconds: int = Field(30, ge=1, le=600)
+    status_checks: bool = True
+
+
+class ScriptDesign(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    correlations: list[CorrelationRule] = Field(default_factory=list, max_length=2000)
+    parameters: list[Parameter] = Field(default_factory=list, max_length=500)
+    data_files: list[DataFile] = Field(default_factory=list, max_length=50)
+    replacements: list[Replacement] = Field(default_factory=list, max_length=2000)
+    checks: list[Check] = Field(default_factory=list, max_length=5000)
+    settings: RuntimeSettings = Field(default_factory=RuntimeSettings)
+
+    @model_validator(mode="after")
+    def _check(self) -> "ScriptDesign":
+        names: dict[str, str] = {}
+        for owner, variables in ([(f"parameter {p.name}", [p.name]) for p in self.parameters]
+                                 + [(f"file {f.name}", f.columns) for f in self.data_files]):
+            for v in variables:
+                if v.lower() in names:
+                    raise ValueError(f"variable {v} is defined twice ({names[v.lower()]} and {owner})")
+                names[v.lower()] = owner
+        for rule in self.correlations:
+            if rule.variable.lower() in names:
+                raise ValueError(f"variable {rule.variable} is both a correlation and {names[rule.variable.lower()]}")
+        if len({f.name.lower() for f in self.data_files}) != len(self.data_files):
+            raise ValueError("data file names must be unique")
+        for prefix, entries in (("c", self.correlations), ("k", self.checks)):
+            used = {e.id for e in entries if e.id}
+            n = 1
+            for entry in entries:
+                if not entry.id:
+                    while f"{prefix}{n}" in used:
+                        n += 1
+                    entry.id = f"{prefix}{n}"
+                    used.add(entry.id)
+        return self
+
+
+class DesignUpdate(BaseModel):
+    """Replace one or more parts of a script's design; parts left out are unchanged."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    correlations: list[CorrelationRule] | None = None
+    parameters: list[Parameter] | None = None
+    data_files: list[DataFile] | None = None
+    replacements: list[Replacement] | None = None
+    checks: list[Check] | None = None
+    settings: RuntimeSettings | None = None

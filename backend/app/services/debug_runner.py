@@ -1,304 +1,252 @@
-"""Execute and inspect small, isolated debug runs for imported HAR flows."""
+"""Debug replay: run a script once with one user and compare the replay with the recording.
+
+The equivalent of replaying in LoadRunner's VuGen (or JMeter's View Results Tree). Every
+request is labelled "#<index> ..." in the plan, so results map back to the recorded requests.
+A Debug Sampler after each request that feeds a correlation records the variables it set.
+
+For each request the summary lists what went wrong and the most likely cause (requirements
+8.7 and 8.8): unresolved ${variables}, extractors that found nothing, status codes that differ
+from the recording, failed checks and connection errors.
+"""
 from __future__ import annotations
 
-import json
-import logging
-import os
 import re
-import shutil
-import signal
-import subprocess
-import sys
-import threading
-import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
-from ..config import Settings
-from ..db import Database, now_iso
-from ..models.test_config import SENSITIVE_HEADERS
-from ..services.test_executor import TooManyTests, TestExecutor
+from . import xmlsafe
+from .correlation import mask
 
-log = logging.getLogger("perf.debug")
-_SECRET_KEY = re.compile(r"password|passwd|secret|token|authorization|cookie|csrf|api.?key", re.IGNORECASE)
-_SECRET_HEADER = SENSITIVE_HEADERS | {"x-csrf-token", "x-xsrf-token"}
-_PATH_ID = re.compile(r"^(?:\d{5,}|[0-9a-f]{8}-[0-9a-f-]{27,})$", re.IGNORECASE)
-MAX_DEBUG_SECONDS = 300
+PROPERTIES = (
+    "-Jjmeter.save.saveservice.output_format=xml",
+    "-Jjmeter.save.saveservice.response_data=true",
+    "-Jjmeter.save.saveservice.samplerData=true",
+    "-Jjmeter.save.saveservice.requestHeaders=true",
+    "-Jjmeter.save.saveservice.responseHeaders=true",
+    "-Jjmeter.save.saveservice.url=true",
+    "-Jjmeter.save.saveservice.assertion_results=all",
+    "-Jjmeter.save.saveservice.response_data.on_error=false",
+)
+KEEP_RUNS = 10
+MAX_BODY_CHARS = 256_000
+SENSITIVE = re.compile(r"^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token)\s*:",
+                       re.IGNORECASE | re.MULTILINE)
+_LABEL = re.compile(r"^#(\d+) ")
+_VARIABLES = re.compile(r"^\[variables after #(\d+)\]$")
+_UNRESOLVED = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_ID_SEGMENT = re.compile(r"/(\d{3,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[A-Za-z0-9_-]{16,})(/|$|\?)",
+                         re.IGNORECASE)
 
 
-def debug_paths(settings: Settings, run_id: str) -> dict[str, Path]:
-    base = settings.runs_dir / run_id
+def _text(sample: ET.Element, tag: str) -> str:
+    el = sample.find(tag)
+    return xmlsafe.visible(el.text or "") if el is not None else ""
+
+
+def parse_results(path: Path) -> list[dict[str, Any]]:
+    """Top-level samples of an XML results file, in run order."""
+    if not path.exists() or not path.stat().st_size:
+        return []
+    raw = path.read_bytes()
+    if b"</testResults>" not in raw[-64:]:
+        raw += b"</testResults>"            # a stopped run can leave the file unterminated
+    root = xmlsafe.parse(raw)
+    samples = []
+    for el in root:
+        if el.tag not in ("httpSample", "sample"):
+            continue
+        assertions = [{
+            "name": _text(a, "name"),
+            "failed": _text(a, "failure") == "true" or _text(a, "error") == "true",
+            "message": _text(a, "failureMessage"),
+        } for a in el.findall("assertionResult")]
+        samples.append({
+            "label": xmlsafe.visible(el.get("lb", "")),
+            "success": el.get("s") == "true",
+            "status": el.get("rc", ""),
+            "message": el.get("rm", ""),
+            "elapsed_ms": int(el.get("t", "0") or 0),
+            "latency_ms": int(el.get("lt", "0") or 0),
+            "connect_ms": int(el.get("ct", "0") or 0),
+            "bytes": int(el.get("by", "0") or 0),
+            "sent_bytes": int(el.get("sby", "0") or 0),
+            "timestamp": int(el.get("ts", "0") or 0),
+            "url": _text(el, "java.net.URL"),
+            "method": _text(el, "method"),
+            "request_headers": _text(el, "requestHeader"),
+            "request_body": _text(el, "queryString"),
+            "sampler_data": _text(el, "samplerData"),
+            "response_headers": _text(el, "responseHeader"),
+            "response_body": _text(el, "responseData"),
+            "assertions": assertions,
+        })
+    return samples
+
+
+def _variables(body: str) -> dict[str, str]:
+    out = {}
+    for line in body.splitlines():
+        name, sep, value = line.partition("=")
+        if sep and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            out[name] = value
+    return out
+
+
+def _diagnose(result: dict[str, Any], *, unresolved: list[str], not_found: list[tuple[str, int]]) -> dict[str, str] | None:
+    status = result["status"]
+    code = int(status) if status.isdigit() else None
+    failed_checks = [a for a in result["assertions"] if a["failed"]]
+    body = (result.get("response_body") or "").lower()
+    if status.startswith("Non HTTP"):
+        return {"cause": f"The target could not be reached ({result['message'][:200]}).",
+                "fix": "Check the host and port, that the application is running, and any firewall or proxy.",
+                "where": "requests"}
+    if unresolved:
+        names = ", ".join(f"${{{v}}}" for v in unresolved)
+        return {"cause": f"{names} had no value, so the request sent the text literally.",
+                "fix": "Add a correlation or a parameter with that name, or remove it from the request.",
+                "where": "correlation"}
+    if not_found:
+        var, source = not_found[0]
+        return {"cause": f"The correlation for ${{{var}}} found nothing in the response of request #{source}.",
+                "fix": "Open that response below and adjust the correlation's expression (Correlation tab).",
+                "where": "correlation"}
+    if code in (401, 403):
+        if "csrf" in body or "xsrf" in body:
+            return {"cause": "The CSRF token was missing or stale.",
+                    "fix": "Correlate the CSRF token from the page or cookie that issues it (Correlation tab).",
+                    "where": "correlation"}
+        return {"cause": "Not authenticated: the login token or session cookie was not sent or not accepted.",
+                "fix": "Check that the login request passed and that its token is correlated into this request.",
+                "where": "correlation"}
+    if code in (400, 422):
+        return {"cause": "The server rejected the request data.",
+                "fix": "A dynamic value may still be hard-coded: correlate or parameterize it.",
+                "where": "parameters"}
+    if code == 404 and _ID_SEGMENT.search(result.get("url") or ""):
+        return {"cause": "The recorded ID in the URL does not exist in this run.",
+                "fix": "Correlate the ID from the response that creates it, or parameterize it.",
+                "where": "correlation"}
+    if code is not None and code >= 500:
+        return {"cause": f"The server failed with HTTP {code}.",
+                "fix": "Check the server logs; often a value in the request is wrong for this run.",
+                "where": "requests"}
+    if failed_checks:
+        return {"cause": f"A check failed: {failed_checks[0]['message'] or failed_checks[0]['name']}",
+                "fix": "The response differs from the recording. An error page or a login redirect "
+                       "usually means an earlier step failed.",
+                "where": "checks"}
+    if result.get("recorded_status") and code and code != result["recorded_status"]:
+        return {"cause": f"The recording got HTTP {result['recorded_status']}, the replay got {code}.",
+                "fix": "Compare the response with the recording.", "where": "requests"}
+    return None
+
+
+def summarize(path: Path, script: dict[str, Any], view: dict[str, Any], built_unresolved: dict[str, list[int]],
+              warnings: list[str]) -> dict[str, Any]:
+    """Per-request comparison with the recording, diagnosis and the first failure."""
+    samples = parse_results(path)
+    design = script.get("design") or {}
+    correlations = design.get("correlations") or []
+    source_of = {c["variable"]: c["source"] for c in correlations}
+    interesting = set(source_of) | {p["name"] for p in design.get("parameters") or []}
+    interesting |= {c for f in design.get("data_files") or [] for c in f.get("columns", [])}
+    interesting |= set(script.get("variables") or [])
+
+    by_index: dict[int, dict[str, Any]] = {}
+    variables: dict[str, str] = {}
+    transactions = []
+    for s in samples:
+        m = _LABEL.match(s["label"])
+        v = _VARIABLES.match(s["label"])
+        if m:
+            by_index.setdefault(int(m.group(1)), s)
+        elif v:
+            variables.update({k: val for k, val in _variables(s["response_body"]).items() if k in interesting})
+        else:
+            transactions.append({"name": s["label"], "success": s["success"], "elapsed_ms": s["elapsed_ms"]})
+
+    items = []
+    first_failure = None
+    tx_of = {i: t["name"] for t in view["transactions"] for i in t["items"]}
+    for tx in view["transactions"]:
+        for index in tx["items"]:
+            item = script["items"][index]
+            s = by_index.get(index)
+            row: dict[str, Any] = {"index": index, "label": item["label"], "transaction": tx_of.get(index),
+                                   "recorded_status": item.get("status"), "issues": []}
+            if s is None:
+                row.update(state="not_run", status=None, success=False, elapsed_ms=None, diagnosis=None)
+                row["issues"].append("Not run (an earlier error stopped the iteration, or it is in a logic controller)")
+                items.append(row)
+                continue
+            sent = f"{s['url']}\n{s['request_body']}\n{s['request_headers']}"
+            unresolved = sorted(set(_UNRESOLVED.findall(sent)))
+            not_found = [(var, source_of[var]) for var in sorted(set(re.findall(r"([A-Za-z_][A-Za-z0-9_]*)_NOT_FOUND", sent)))
+                         if var in source_of]
+            row.update(state="ran", status=s["status"], success=s["success"], elapsed_ms=s["elapsed_ms"],
+                       bytes=s["bytes"], url=s["url"], method=s["method"],
+                       checks=[{"name": a["name"], "failed": a["failed"], "message": a["message"]} for a in s["assertions"]])
+            row["response_body"] = s["response_body"][:2000]
+            if unresolved:
+                row["issues"].append("Unresolved: " + ", ".join(f"${{{v}}}" for v in unresolved))
+            for var, source in not_found:
+                row["issues"].append(f"${{{var}}} was not found in request #{source}'s response")
+            if item.get("status") and s["status"].isdigit() and int(s["status"]) != item["status"]:
+                row["issues"].append(f"Status {s['status']} (recorded {item['status']})")
+            for a in s["assertions"]:
+                if a["failed"]:
+                    row["issues"].append(f"Check failed: {a['message'] or a['name']}")
+            if not s["success"] and not row["issues"]:
+                row["issues"].append(f"Failed: {s['status']} {s['message']}")
+            row["diagnosis"] = _diagnose({**s, "recorded_status": item.get("status")}, unresolved=unresolved,
+                                         not_found=not_found) if (row["issues"] or not s["success"]) else None
+            del row["response_body"]
+            if first_failure is None and (row["issues"] or not s["success"]):
+                first_failure = index
+            items.append(row)
+
+    ran = [i for i in items if i["state"] == "ran"]
     return {
-        "dir": base,
-        "plan": base / "debug_plan.jmx",
-        "jtl": base / "debug_results.jtl",
-        "log": base / "jmeter.log",
-        "stdout": base / "jmeter_stdout.log",
+        "requests": len(items),
+        "passed": sum(1 for i in ran if i["success"] and not i["issues"]),
+        "failed": sum(1 for i in ran if not i["success"] or i["issues"]),
+        "not_run": sum(1 for i in items if i["state"] == "not_run"),
+        "first_failure": first_failure,
+        "verdict": "pass" if items and all(i["state"] == "ran" and i["success"] and not i["issues"] for i in items) else "fail",
+        "items": items,
+        "transactions": transactions,
+        "variables": {k: {"preview": mask(v) if len(v) > 12 else v, "not_found": v.endswith("_NOT_FOUND")}
+                      for k, v in sorted(variables.items())},
+        "unresolved": built_unresolved,
+        "warnings": warnings,
     }
 
 
-def debug_jmeter_properties() -> list[str]:
-    return [
-        "-Jjmeter.save.saveservice.output_format=xml",
-        "-Jjmeter.save.saveservice.response_data=true",
-        "-Jjmeter.save.saveservice.samplerData=true",
-        "-Jjmeter.save.saveservice.requestHeaders=true",
-        "-Jjmeter.save.saveservice.responseHeaders=true",
-        "-Jjmeter.save.saveservice.assertions=true",
-        "-Jjmeter.save.saveservice.subresults=true",
-        "-Jjmeter.save.saveservice.url=true",
-        "-Jjmeter.save.saveservice.timestamp_format=ms",
-    ]
-
-
-def _mask_json(text: str) -> str:
-    try:
-        value = json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return re.sub(
-            r'(?i)\b(password|passwd|secret|token|authorization|cookie|csrf|api[_-]?key)\b'
-            r'(\s*[:=]\s*)(["\']?)[^&\s,"\']+',
-            r"\1\2********",
-            text,
-        )
-
-    def mask(value: Any) -> Any:
-        if isinstance(value, dict):
-            return {key: ("********" if _SECRET_KEY.search(key) else mask(child))
-                    for key, child in value.items()}
-        if isinstance(value, list):
-            return [mask(child) for child in value]
-        return value
-
-    return json.dumps(mask(value), ensure_ascii=False, indent=2)
-
-
-def _number(value: str) -> int:
-    try:
-        return int(value or 0)
-    except ValueError:
-        return 0
+def sample_detail(path: Path, index: int, *, reveal: bool) -> dict[str, Any] | None:
+    """Full request and response of one request in a debug run."""
+    for s in parse_results(path):
+        m = _LABEL.match(s["label"])
+        if m and int(m.group(1)) == index:
+            detail = dict(s)
+            if not reveal:
+                for key in ("request_headers", "response_headers"):
+                    detail[key] = _mask_headers(detail[key])
+            truncated = len(detail["response_body"]) > MAX_BODY_CHARS
+            detail["response_body"] = detail["response_body"][:MAX_BODY_CHARS]
+            detail["response_truncated"] = truncated
+            detail["revealed"] = reveal
+            return detail
+    return None
 
 
 def _mask_headers(text: str) -> str:
     lines = []
     for line in text.splitlines():
-        name, separator, value = line.partition(":")
-        if separator and name.strip().lower() in _SECRET_HEADER:
+        if SENSITIVE.match(line):
+            name = line.split(":", 1)[0]
             lines.append(f"{name}: ********")
         else:
             lines.append(line)
     return "\n".join(lines)
-
-
-def _safe_url(value: str) -> str:
-    try:
-        parts = urlsplit(value)
-        path = "/".join("<redacted>" if _PATH_ID.fullmatch(part) else part
-                        for part in parts.path.split("/"))
-        query = "&".join(f"{key}=<redacted>" for key, _ in parse_qsl(parts.query, keep_blank_values=True))
-        return urlunsplit((parts.scheme, parts.hostname or "", path, query, ""))
-    except ValueError:
-        return "<redacted URL>"
-
-
-def parse_debug_samples(path: Path, script: dict[str, Any]) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    try:
-        root = ET.parse(path).getroot()
-    except (ET.ParseError, OSError):
-        return []
-    samples = []
-    for element in root.iter():
-        if element.tag != "httpSample":
-            continue
-        def child_text(name: str) -> str:
-            child = element.find(name)
-            return child.text or "" if child is not None else ""
-
-        assertion_results = []
-        for result in element.findall("assertionResult"):
-            failed = (result.findtext("failure") or "false").lower() == "true"
-            error = (result.findtext("error") or "false").lower() == "true"
-            assertion_results.append({
-                "name": result.findtext("name") or "Assertion",
-                "passed": not failed and not error,
-                "message": result.findtext("failureMessage") or "",
-            })
-        raw_url = element.get("url", "")
-        sampler_data = child_text("samplerData")
-        request_headers = _mask_headers(child_text("requestHeader"))
-        response_headers = _mask_headers(child_text("responseHeader"))
-        request_body = sampler_data.split("\n\n", 1)[1] if "\n\n" in sampler_data else ""
-        response_body = child_text("responseData")
-        request_body = _mask_json(request_body)
-        response_body = _mask_json(response_body)
-        code = element.get("rc", element.get("responseCode", ""))
-        success = element.get("s", element.get("success", "false")).lower() == "true" and all(
-            result["passed"] for result in assertion_results
-        )
-        samples.append({
-            "index": len(samples),
-            "label": element.get("lb", ""),
-            "method": sampler_data.split(" ", 1)[0] if sampler_data else "",
-            "url": _safe_url(raw_url),
-            "request": {
-                "headers": request_headers,
-                "body": request_body,
-                "cookies": "Cookies are masked in request headers.",
-            },
-            "response": {
-                "status_code": code,
-                "headers": response_headers,
-                "body": response_body,
-            },
-            "timing": {
-                "connect_ms": _number(element.get("ct", "0")),
-                "latency_ms": _number(element.get("lt", "0")),
-                "total_ms": _number(element.get("t", "0")),
-            },
-            "assertions": assertion_results,
-            "success": success,
-            "failure": element.get("failureMessage", "") or child_text("failureMessage"),
-            "variables": [
-                {"name": rule["variable"], "source_index": rule["source_index"],
-                 "targets": rule["target_indices"], "value": "Captured by JMeter; value masked."}
-                for rule in script["correlations"] if rule.get("enabled", True)
-            ],
-        })
-    return samples
-
-
-class DebugRunExecutor:
-    def __init__(self, settings: Settings, db: Database, shared_executor: TestExecutor):
-        self.settings = settings
-        self.db = db
-        self.shared_executor = shared_executor
-        self._threads: dict[str, threading.Thread] = {}
-        self._processes: dict[str, subprocess.Popen] = {}
-        self._lock = threading.Lock()
-
-    def start(self, run_id: str, script: dict[str, Any], plan: str, csv_data: bytes | None) -> None:
-        self.shared_executor.reserve_external_slot(run_id)
-        paths = debug_paths(self.settings, run_id)
-        try:
-            paths["dir"].mkdir(parents=True, exist_ok=False)
-            paths["plan"].write_text(plan, encoding="utf-8")
-            os.chmod(paths["plan"], 0o600)
-            if csv_data is not None:
-                data_path = paths["dir"] / "parameters.csv"
-                data_path.write_bytes(csv_data)
-                os.chmod(data_path, 0o600)
-            thread = threading.Thread(
-                target=self._run, args=(run_id, script, paths), daemon=True,
-                name=f"debug-{run_id}",
-            )
-            with self._lock:
-                self._threads[run_id] = thread
-            thread.start()
-        except Exception:
-            self.shared_executor.release_external_slot(run_id)
-            shutil.rmtree(paths["dir"], ignore_errors=True)
-            raise
-
-    def _launcher(self) -> list[str]:
-        if self.settings.jmeter_bin.lower().endswith(".py"):
-            if not Path(self.settings.jmeter_bin).exists():
-                raise FileNotFoundError(f"JMeter was not found ('{self.settings.jmeter_bin}').")
-            return [sys.executable, self.settings.jmeter_bin]
-        if shutil.which(self.settings.jmeter_bin) is None:
-            raise FileNotFoundError(
-                f"JMeter was not found ('{self.settings.jmeter_bin}'). "
-                "Install Apache JMeter or set JMETER_BIN to its full path."
-            )
-        return ["cmd.exe", "/c", self.settings.jmeter_bin]
-
-    def _run(self, run_id: str, script: dict[str, Any], paths: dict[str, Path]) -> None:
-        self.db.update_debug_run(run_id, status="running", started_at=now_iso())
-        process = None
-        error = None
-        try:
-            env = os.environ.copy()
-            env.pop("JMETER_BIN", None)
-            with paths["stdout"].open("wb") as output:
-                process = subprocess.Popen(
-                    [*self._launcher(), "-n", "-t", str(paths["plan"]), "-l", str(paths["jtl"]),
-                     "-j", str(paths["log"]), *debug_jmeter_properties()],
-                    cwd=paths["dir"], env=env, stdout=output, stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-                with self._lock:
-                    self._processes[run_id] = process
-                try:
-                    exit_code = process.wait(timeout=MAX_DEBUG_SECONDS)
-                except subprocess.TimeoutExpired:
-                    process.terminate()
-                    try:
-                        exit_code = process.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        exit_code = process.wait(timeout=5)
-                    error = f"Debug run exceeded the {MAX_DEBUG_SECONDS}-second limit."
-            if exit_code != 0 and error is None:
-                error = f"JMeter exited with code {exit_code}. Check the debug JMeter log."
-        except FileNotFoundError as exc:
-            error = str(exc)
-        except Exception as exc:  # noqa: BLE001
-            log.exception("debug run %s failed", run_id)
-            error = f"Could not run debug plan: {exc}"
-        finally:
-            if process is not None and process.poll() is None:
-                try:
-                    process.kill()
-                    process.wait(timeout=5)
-                except (OSError, subprocess.SubprocessError):
-                    log.exception("could not stop JMeter process for debug run %s", run_id)
-                    error = error or "Could not stop the JMeter debug process."
-            with self._lock:
-                self._processes.pop(run_id, None)
-            try:
-                csv_path = paths["dir"] / "parameters.csv"
-                if csv_path.exists():
-                    csv_path.unlink()
-            except OSError:
-                error = error or "Could not remove the temporary CSV used by this debug run."
-                log.exception("could not remove temporary CSV for debug run %s", run_id)
-            try:
-                samples = parse_debug_samples(paths["jtl"], script)
-                summary = {
-                    "samples": len(samples),
-                    "passed": sum(sample["success"] for sample in samples),
-                    "failed": sum(not sample["success"] for sample in samples),
-                    "assertion_failures": sum(
-                        not assertion["passed"]
-                        for sample in samples
-                        for assertion in sample["assertions"]
-                    ),
-                }
-                self.db.update_debug_run(
-                    run_id, status="failed" if error else "completed",
-                    summary_json=json.dumps(summary), error=error, finished_at=now_iso(),
-                )
-            except Exception as exc:  # noqa: BLE001
-                error = error or f"Could not finalize debug run: {exc}"
-                log.exception("could not finalize debug run %s", run_id)
-                try:
-                    self.db.update_debug_run(
-                        run_id, status="failed", error=error, finished_at=now_iso(),
-                    )
-                except Exception:  # noqa: BLE001
-                    log.exception("could not persist failed finalization for debug run %s", run_id)
-            finally:
-                with self._lock:
-                    self._threads.pop(run_id, None)
-                self.shared_executor.release_external_slot(run_id)
-
-    def shutdown(self) -> None:
-        with self._lock:
-            processes = list(self._processes.values())
-        for process in processes:
-            if process.poll() is None:
-                process.terminate()
