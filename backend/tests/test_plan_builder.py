@@ -68,3 +68,20 @@ def test_step_profile_generates_incremental_scheduled_thread_groups():
     assert [prop(group, "ThreadGroup.ramp_time") for group in groups] == ["0", "0", "0"]
     assert len(root.findall(".//HTTPSamplerProxy")) == 3
     assert [prop(sampler, "HTTPSampler.method") for sampler in root.findall(".//HTTPSamplerProxy")] == ["GET"] * 3
+
+
+def test_spike_profile_generates_phase_thread_groups():
+    root = plan(
+        test_type="spike",
+        users=100,
+        duration_seconds=60,
+        profile=[
+            {"time_seconds": 0, "users": 10},
+            {"time_seconds": 10, "users": 100},
+            {"time_seconds": 30, "users": 10},
+        ],
+    )
+    groups = root.findall(".//ThreadGroup")
+    assert [prop(group, "ThreadGroup.num_threads") for group in groups] == ["10", "100", "10"]
+    assert [prop(group, "ThreadGroup.delay") for group in groups] == ["0", "10", "30"]
+    assert [prop(group, "ThreadGroup.duration") for group in groups] == ["10", "20", "30"]

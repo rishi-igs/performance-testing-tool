@@ -10,6 +10,7 @@ from ..deps import audit, require_api_key
 from ..models.test_config import LoadTestConfig
 from ..models.test_result import TestCreated, TestRecord
 from ..services import result_analyzer
+from ..services.comparison import compare_summaries
 from ..services.security import TargetNotAllowed, check_target
 from ..services.test_executor import TooManyTests, run_paths
 
@@ -95,6 +96,28 @@ def get_timeline(test_id: str, request: Request, bucket_seconds: int = 5, _: str
     paths = run_paths(request.app.state.settings, test["id"])
     samples = result_analyzer.parse_jtl(paths["jtl"])
     return {"bucket_seconds": bucket_seconds, "points": result_analyzer.timeline(samples, bucket_seconds)}
+
+
+@router.get("/{test_id}/compare")
+def compare_test(
+    test_id: str,
+    request: Request,
+    baseline_id: str,
+    _: str = Depends(require_api_key),
+):
+    current = get_test_or_404(request, test_id)
+    baseline = get_test_or_404(request, baseline_id)
+    if current["status"] == "running" or baseline["status"] == "running":
+        raise HTTPException(409, "Both tests must finish before they can be compared")
+    current_summary = live_summary(request, current)
+    baseline_summary = live_summary(request, baseline)
+    if not current_summary or not baseline_summary:
+        raise HTTPException(422, "Both tests must have result metrics before comparison")
+    return {
+        "current": {"id": current["id"], "name": current["name"]},
+        "baseline": {"id": baseline["id"], "name": baseline["name"]},
+        **compare_summaries(current_summary, baseline_summary),
+    }
 
 
 @router.post("/{test_id}/stop")

@@ -1,4 +1,4 @@
-"""Request model for creating a performance test (Phase 1 scope)."""
+"""Request model for creating a performance test and its traffic schedule."""
 from __future__ import annotations
 
 from typing import Literal
@@ -31,9 +31,13 @@ class LoadTestConfig(BaseModel):
     method: Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"] = "GET"
     headers: dict[str, str] = Field(default_factory=dict)
     body: str | None = Field(default=None, max_length=1_000_000)
+    test_type: Literal[
+        "load", "stress", "spike", "soak", "volume", "scalability", "breakpoint"
+    ] = "load"
     users: int = Field(10, ge=1)
     duration_seconds: int = Field(60, ge=1)
     ramp_up_seconds: int = Field(0, ge=0)
+    ramp_down_seconds: int = Field(0, ge=0)
     profile: list[TrafficStep] | None = Field(default=None, min_length=2, max_length=100)
     think_time_ms: int = Field(0, ge=0, le=60_000)
     timeout_ms: int = Field(30_000, ge=100, le=300_000)
@@ -71,20 +75,32 @@ class LoadTestConfig(BaseModel):
     def _validate_load_schedule(self) -> "LoadTestConfig":
         if self.ramp_up_seconds > self.duration_seconds:
             raise ValueError("ramp_up_seconds cannot be longer than duration_seconds")
+        if self.ramp_down_seconds > self.duration_seconds:
+            raise ValueError("ramp_down_seconds cannot be longer than duration_seconds")
         if self.profile is not None:
-            if self.ramp_up_seconds:
-                raise ValueError("ramp_up_seconds must be 0 when a step-load profile is set")
             if self.profile[0].time_seconds != 0:
                 raise ValueError("profile must start at time_seconds 0")
-            if self.profile[-1].users != self.users:
-                raise ValueError("users must equal the final profile step's user count")
             for previous, current in zip(self.profile, self.profile[1:]):
                 if current.time_seconds <= previous.time_seconds:
                     raise ValueError("profile time_seconds values must be strictly increasing")
-                if current.users <= previous.users:
-                    raise ValueError("profile user counts must be strictly increasing")
-            if self.profile[-1].time_seconds >= self.duration_seconds:
+            if self.test_type == "load":
+                if self.ramp_up_seconds:
+                    raise ValueError("ramp_up_seconds must be 0 when a load profile is set")
+                if self.ramp_down_seconds:
+                    raise ValueError("ramp_down_seconds must be 0 when a load profile is set")
+                if self.profile[-1].users != self.users:
+                    raise ValueError("users must equal the final load profile step's user count")
+                if self.profile[-1].time_seconds >= self.duration_seconds:
+                    raise ValueError("the final profile step must start before duration_seconds")
+                if any(current.users <= previous.users
+                       for previous, current in zip(self.profile, self.profile[1:])):
+                    raise ValueError("load profile user counts must be strictly increasing")
+            elif self.profile[-1].time_seconds >= self.duration_seconds:
                 raise ValueError("the final profile step must start before duration_seconds")
+        elif self.test_type == "spike" and self.ramp_up_seconds:
+            raise ValueError("spike tests use profile steps instead of ramp_up_seconds")
+        elif self.ramp_up_seconds + self.ramp_down_seconds > self.duration_seconds:
+            raise ValueError("ramp_up_seconds plus ramp_down_seconds cannot exceed duration_seconds")
         return self
 
     def masked(self) -> dict:

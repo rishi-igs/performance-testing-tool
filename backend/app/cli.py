@@ -65,6 +65,17 @@ def run(args: argparse.Namespace) -> int:
           f"p50 {rt.get('p50')} ms, p95 {rt.get('p95')} ms, p99 {rt.get('p99')} ms, {m['throughput_rps']} req/s")
     for w in m["warnings"]:
         print(f"  [{w['severity']}] {w['message']}")
+    if args.baseline:
+        comparison = _request(
+            args.server,
+            f"/tests/{test_id}/compare?baseline_id={args.baseline}",
+        )
+        print(
+            f"  Baseline: {comparison['status']} "
+            f"({', '.join(comparison['regressions']) or 'no regressions'})"
+        )
+        if comparison["status"] == "regressed":
+            return 1
     print(f"  Report: {args.server.rstrip('/')}/reports/{test_id}")
     return 0 if m["verdict"] == "pass" else 1
 
@@ -76,6 +87,10 @@ def main() -> None:
     p.add_argument("config")
     p.add_argument("--server", default="http://127.0.0.1:8000")
     p.add_argument("--interval", type=float, default=3.0, help="seconds between progress checks")
+    p.add_argument(
+        "--baseline",
+        help="completed test ID to compare against; regressions return exit code 1",
+    )
     p.set_defaults(func=run)
     args = parser.parse_args()
     sys.exit(args.func(args))

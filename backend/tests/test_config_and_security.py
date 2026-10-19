@@ -35,6 +35,20 @@ def test_accepts_valid_increasing_step_profile():
     assert c.profile[-1].users == c.users
 
 
+def test_accepts_non_monotonic_profile_for_spike_tests():
+    c = cfg(
+        test_type="spike",
+        users=100,
+        duration_seconds=60,
+        profile=[
+            {"time_seconds": 0, "users": 10},
+            {"time_seconds": 10, "users": 100},
+            {"time_seconds": 30, "users": 10},
+        ],
+    )
+    assert c.test_type == "spike"
+
+
 @pytest.mark.parametrize("overrides", [
     {"profile": [{"time_seconds": 5, "users": 10}, {"time_seconds": 10, "users": 20}], "users": 20},
     {"profile": [{"time_seconds": 0, "users": 10}, {"time_seconds": 10, "users": 20}], "users": 20, "duration_seconds": 10},
