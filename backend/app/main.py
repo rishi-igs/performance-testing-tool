@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import Settings, load_settings
 from .db import Database
-from .routers import auth, debug, infra, projects, reports, scenarios, schedules, scripts, tests, users
+from .routers import auth, dashboard, debug, infra, projects, reports, scenarios, schedules, scripts, tests, users
 from .services.auth import LoginThrottle
 from .services.scheduler import Scheduler
 from .services.test_executor import TestExecutor
@@ -47,7 +47,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health():
         return {"status": "ok", "auth_required": bool(settings.api_key) or app.state.db.count_users() > 0}
 
-    for module in (auth, users, projects, tests, reports, scripts, debug, scenarios, schedules, infra):
+    for module in (auth, users, projects, dashboard, tests, reports, scripts, debug, scenarios, schedules, infra):
         app.include_router(module.router)
     if FRONTEND_DIR.is_dir():
         app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="ui")

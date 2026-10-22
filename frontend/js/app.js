@@ -1,12 +1,13 @@
 "use strict";
 // Navigation: the address hash names the screen, so refresh and the back button keep your place.
+//   #/overview (also an empty hash)             running tests, alerts and recent results
 //   #/quick[/<test id>]                         quick test and its results
 //   #/scripts[/<id>[/<tab>[/<debug run id>]]]   imported scripts
 //   #/scenarios[/new | /<id>[/run/<run id>]]    scenarios and their runs
 //   #/scenarios/<id>/compare/<a>/<b>, #/quick/<a>/compare/<b>    two runs side by side
 //   #/team, #/account                           users and projects; your password and API tokens
 
-const SECTIONS = ["quick", "scripts", "scenarios", "infra", "team", "account"];
+const SECTIONS = ["overview", "quick", "scripts", "scenarios", "infra", "team", "account"];
 
 function showSection(name) {
   state.section = name;
@@ -21,8 +22,8 @@ function showSection(name) {
 function route() {
   clearTimeout(state.timer);
   if (!state.me || !state.me.authenticated) { showSignIn(); return; }
-  const [section = "quick", id, tab, sub, extra] = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
-  showSection(SECTIONS.includes(section) ? section : "quick");
+  const [section = "overview", id, tab, sub, extra] = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
+  showSection(SECTIONS.includes(section) ? section : "overview");
   if (tab === "compare" && state.section === "scenarios" && sub && extra) {
     openCompare(sub, extra, `#/scenarios/${id}/run/${sub}`); return;
   }
@@ -34,6 +35,7 @@ function route() {
     return;
   }
   state.script = null;
+  if (state.section === "overview") { openOverview(); return; }
   if (state.section === "infra") { openInfra(); return; }
   if (state.section === "team") { openTeam(); return; }
   if (state.section === "account") { openAccount(); return; }

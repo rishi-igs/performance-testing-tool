@@ -162,7 +162,7 @@ process.on("unhandledRejection", (e) => { failures.push(`unhandled: ${e && e.sta
 // ---- the scenario ---------------------------------------------------------------------------
 (async () => {
   for (const file of ["core.js", "quick.js", "scripts.js", "design.js", "debug.js", "validation.js", "scenarios.js", "results.js",
-    "analysis.js", "infra.js", "schedules.js", "team.js", "app.js"]) {
+    "analysis.js", "infra.js", "schedules.js", "team.js", "overview.js", "app.js"]) {
     vm.runInThisContext(fs.readFileSync(path.join(__dirname, "..", "js", file), "utf8"), { filename: file });
   }
   const sid = SCRIPT_ID;
@@ -349,6 +349,11 @@ process.on("unhandledRejection", (e) => { failures.push(`unhandled: ${e && e.sta
   click(byText(compareForm, "button", "Compare"));
   await waitFor(() => text(main).includes("Run comparison"), "the comparison opens");
   check(text(main).includes("Login") && text(main).includes("A (baseline)"), "the comparison lists business functions for both runs");
+
+  // ---- the overview lists the runs and their results ----
+  go("#/overview");
+  await waitFor(() => text(main).includes("Recent results") && text(main).includes("Smoke scenario"), "the overview lists recent runs");
+  check(/Last 24 hours: \d+ runs/.test(text(main)) && text(main).includes("passed"), "the overview counts the day's runs and verdicts");
 
   // ---- trends, the baseline and a scheduled run, on the scenario page ----
   const useAsBaseline = () => within(main, e => e.tag === "button" && text(e) === "Use as baseline");

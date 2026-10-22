@@ -101,6 +101,7 @@
   .url { color: var(--muted); font-size: 13px; word-break: break-all; }
   .progress { height: 3px; background: var(--line); margin: 18px 0 0; border-radius: 2px; overflow: hidden; }
   .progress > div { height: 100%; background: var(--accent); width: 0; transition: width .6s linear; }
+  .progress.mini { margin: 8px 0 0; min-width: 90px; height: 4px; }
 
   .hero { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 16px 8px; margin-top: 12px; }
   .hero h2 { font-size: 14px; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
@@ -247,12 +248,17 @@
     <div class="brand">Load test console<small>Runs Apache JMeter for you</small></div>
     <div class="userbar" id="userbar"></div>
     <nav class="sections" aria-label="Sections">
+      <a href="#/overview" data-section="overview">Overview</a>
       <a href="#/quick" data-section="quick">Quick test</a>
       <a href="#/scripts" data-section="scripts">Scripts</a>
       <a href="#/scenarios" data-section="scenarios">Scenarios</a>
       <a href="#/infra" data-section="infra">Infrastructure</a>
       <a href="#/team" data-section="team" id="nav-team" hidden>Team</a>
     </nav>
+
+    <section id="sec-overview" aria-label="Overview" hidden>
+      <p class="empty">Everything running now, alerts from the latest runs, and recent results with their verdicts. Open a run for its charts, analysis, comparison and reports.</p>
+    </section>
 
     <section id="sec-quick" aria-label="Quick test">
       <form id="form" autocomplete="off">
@@ -368,6 +374,7 @@
 <script src="/js/infra.js"></script>
 <script src="/js/schedules.js"></script>
 <script src="/js/team.js"></script>
+<script src="/js/overview.js"></script>
 <script src="/js/app.js"></script>
 </body>
 </html>
