@@ -1,0 +1,9 @@
+{
+  "name": "performance-testing-dashboard",
+  "private": true,
+  "description": "Runs the local development servers; the tool itself is Python (see backend/).",
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "start": "node scripts/dev.js --tool-only"
+  }
+}
