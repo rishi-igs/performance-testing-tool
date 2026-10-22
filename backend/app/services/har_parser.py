@@ -110,6 +110,23 @@ def _body(post: Any) -> tuple[str | None, str | None]:
     return (text if isinstance(text, str) else None), mime
 
 
+def _cookie_names(req: dict[str, Any]) -> list[str]:
+    """Names of the cookies a request sent (values are not kept)."""
+    names = [str(c.get("name")) for c in req.get("cookies") or [] if isinstance(c, dict) and c.get("name")]
+    for h in req.get("headers") or []:
+        if isinstance(h, dict) and str(h.get("name") or "").lower() == "cookie":
+            names += [part.split("=", 1)[0].strip() for part in str(h.get("value") or "").split(";") if "=" in part]
+    return list(dict.fromkeys(n for n in names if n))
+
+
+def _set_cookie_names(resp: dict[str, Any]) -> list[str]:
+    names = [str(c.get("name")) for c in resp.get("cookies") or [] if isinstance(c, dict) and c.get("name")]
+    for h in resp.get("headers") or []:
+        if isinstance(h, dict) and str(h.get("name") or "").lower() == "set-cookie":
+            names += [line.split("=", 1)[0].strip() for line in str(h.get("value") or "").split("\n") if "=" in line]
+    return list(dict.fromkeys(n for n in names if n))
+
+
 def _page_name(title: Any) -> str | None:
     """Chrome stores the page URL as the title; only a real document title is useful as a name."""
     if not isinstance(title, str) or not title.strip() or "://" in title:
@@ -183,6 +200,8 @@ def parse_har(raw: bytes) -> dict[str, Any]:
             "error": error or (None if status else "No response recorded (cancelled or blocked)"),
             "headers": headers,
             "body": body,
+            "cookies": _cookie_names(req),
+            "sets_cookies": _set_cookie_names(resp),
         })
 
     if not items:
@@ -191,8 +210,13 @@ def parse_har(raw: bytes) -> dict[str, Any]:
     if all(i["started_ms"] is not None for i in items):
         order = sorted(range(len(items)), key=lambda n: items[n]["started_ms"])
         items, responses = [items[n] for n in order], [responses[n] for n in order]
+    set_at: dict[str, int] = {}
     for index, item in enumerate(items):
         item["index"] = index
+        # Which earlier response set each cookie the request sent (None: set before the recording began).
+        item["cookies"] = [{"name": n, "set_by": set_at.get(n)} for n in item["cookies"]]
+        for name in item.pop("sets_cookies"):
+            set_at[name] = index
 
     found = correlation.detect(items, responses)
     secrets = _hide_secrets(items)

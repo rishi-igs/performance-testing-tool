@@ -29,7 +29,7 @@ from typing import Any
 from ..models.script import Check, CorrelationRule, Parameter, RuntimeSettings, ScriptDesign
 from . import xmlsafe
 from .correlation import replace_value
-from .jmeter_plan_builder import PlanTree, _element, _prop, add_variable, recorded_tree, serialize
+from .jmeter_plan_builder import STATUS_CHECK, PlanTree, _element, _prop, add_variable, recorded_tree, serialize
 from .jmx_importer import rebuild_tree
 
 DATA_DIR = "data"                     # CSV files sit in this folder next to the plan
@@ -48,10 +48,13 @@ class Built:
     files: dict[str, bytes]                                  # relative path -> content
     unresolved: dict[str, list[int]] = field(default_factory=dict)   # variable -> requests using it
     used: dict[str, list[int]] = field(default_factory=dict)         # every variable -> requests using it
+    where: dict[str, list[dict[str, Any]]] = field(default_factory=dict)   # variable -> [{index, where: [...]}]
     empty: list[str] = field(default_factory=list)           # used variables that are defined but empty
     scripted: bool = False                                   # JSR223/BeanShell may define more variables
     warnings: list[str] = field(default_factory=list)
     hosts: list[str] = field(default_factory=list)
+    unchecked: list[int] = field(default_factory=list)       # requests with no assertion at all
+    status_only: list[int] = field(default_factory=list)     # requests checked on their status code only
 
 
 # ---- small element helpers ------------------------------------------------------------------
@@ -121,10 +124,25 @@ def _random_timer(min_ms: float, max_ms: float, name: str) -> ET.Element:
 
 def _texts(sampler: ET.Element, sub: ET.Element) -> list[ET.Element]:
     """Elements whose text is request content: path, body/arguments and header values."""
-    out = [c for c in sampler if c.get("name") == "HTTPSampler.path"]
-    out += [e for e in sampler.iter("stringProp") if e.get("name") == "Argument.value"]
+    return [el for el, _ in _places(sampler, sub)]
+
+
+def _places(sampler: ET.Element, sub: ET.Element) -> list[tuple[ET.Element, str]]:
+    """Request content elements with where they are sent: URL, body, a form field or a header."""
+    out = [(c, "URL") for c in sampler if c.get("name") == "HTTPSampler.path"]
+    raw = any(c.get("name") == "HTTPSampler.postBodyRaw" and (c.text or "").lower() == "true" for c in sampler)
+    for arg in sampler.iter("elementProp"):
+        if arg.get("elementType") not in ("HTTPArgument", "Argument"):
+            continue
+        value = arg.find("stringProp[@name='Argument.value']")
+        name = arg.find("stringProp[@name='Argument.name']")
+        if value is not None:
+            out.append((value, "body" if raw else f"form field {(name.text if name is not None else '') or arg.get('name') or ''}".strip()))
     for manager in (c for c in sub if c.tag == "HeaderManager"):
-        out += [e for e in manager.iter("stringProp") if e.get("name") == "Header.value"]
+        for header in manager.iter("elementProp"):
+            name, value = header.find("stringProp[@name='Header.name']"), header.find("stringProp[@name='Header.value']")
+            if value is not None:
+                out.append((value, f"header {(name.text if name is not None else '') or ''}".strip()))
     return out
 
 
@@ -153,7 +171,8 @@ def _function(p: Parameter) -> str | None:
     return None
 
 
-def _replace_texts(tree: PlanTree, design: ScriptDesign) -> None:
+def _replace_texts(tree: PlanTree, design: ScriptDesign, position: dict[int, int]) -> None:
+    """Recorded text becomes ${variables}; a correlated value only in requests that run after its source."""
     replacements = [(r.find, r.variable, None) for r in design.replacements]
     replacements += [(c.replace, c.variable, c.source) for c in design.correlations if c.replace]
     functions = {f"${{{p.name}}}": expr for p in design.parameters if (expr := _function(p))}
@@ -161,7 +180,7 @@ def _replace_texts(tree: PlanTree, design: ScriptDesign) -> None:
     def rewrite(el: ET.Element, index: int | None) -> None:
         text = el.text or ""
         for find, variable, after in replacements:
-            if after is None or (index is not None and index > after):
+            if after is None or (index is not None and position.get(index, index) > position.get(after, after)):
                 text, _ = replace_value(text, find, variable)
         for ref, expr in functions.items():
             text = text.replace(ref, expr)
@@ -238,13 +257,14 @@ def _assertion(check: Check) -> ET.Element:
     return el
 
 
-def _csv_data_set(path: str, columns: list[str], *, header: bool, recycle: bool, stop: bool, share: str) -> ET.Element:
+def _csv_data_set(path: str, columns: list[str], *, header: bool, recycle: bool, stop: bool, share: str,
+                  delimiter: str = ",") -> ET.Element:
     el = _new("CSVDataSet", "TestBeanGUI", f"Data: {path.rsplit('/', 1)[-1]}")
     _prop(el, "stringProp", "filename", path)
     _prop(el, "stringProp", "fileEncoding", "UTF-8")
     _prop(el, "stringProp", "variableNames", ",".join(columns))
     _prop(el, "boolProp", "ignoreFirstLine", header)
-    _prop(el, "stringProp", "delimiter", ",")
+    _prop(el, "stringProp", "delimiter", "\\t" if delimiter == "\t" else delimiter)    # JMeter writes a tab as \t
     _prop(el, "boolProp", "quotedData", True)
     _prop(el, "boolProp", "recycle", recycle)
     _prop(el, "boolProp", "stopThread", stop)
@@ -271,7 +291,7 @@ def _config_elements(tree: PlanTree, design: ScriptDesign, data: dict[str, bytes
         path = f"{DATA_DIR}/{f.name}"
         files[path] = data.get(f.name, b"")
         elements.append(_csv_data_set(path, f.columns, header=f.first_line_header, recycle=f.recycle,
-                                      stop=f.stop_at_end, share=_SHARE[f.sharing]))
+                                      stop=f.stop_at_end, share=_SHARE[f.sharing], delimiter=f.delimiter))
     for p in design.parameters:
         if p.type == "list" and p.selection == "sequential":
             path = f"{DATA_DIR}/{p.name}.csv"
@@ -369,10 +389,10 @@ def _remove_timers(tree: ET.Element) -> None:
             _remove_timers(el)
 
 
-def _debug_mode(tree: PlanTree) -> None:
-    """One user, one iteration, every request labelled with its index (VuGen's replay)."""
+def _debug_mode(tree: PlanTree, users: int = 1, loops: int = 1) -> None:
+    """A few users (one by default), a few iterations, every request labelled with its index (VuGen's replay)."""
     for tg, _ in _regular_thread_groups(tree):
-        _set_prop(tg, "stringProp", "ThreadGroup.num_threads", 1)
+        _set_prop(tg, "stringProp", "ThreadGroup.num_threads", users)
         _set_prop(tg, "stringProp", "ThreadGroup.ramp_time", 0)
         _set_prop(tg, "boolProp", "ThreadGroup.scheduler", False)
         _set_prop(tg, "stringProp", "ThreadGroup.duration", "")
@@ -383,7 +403,7 @@ def _debug_mode(tree: PlanTree) -> None:
             for c in list(loop):
                 if c.get("name") == "LoopController.loops":
                     loop.remove(c)
-            _prop(loop, "stringProp", "LoopController.loops", 1)
+            _prop(loop, "stringProp", "LoopController.loops", loops)
     for index, (sampler, _, _) in tree.samplers.items():
         sampler.set("testname", f"#{index} {sampler.get('testname')}")
 
@@ -431,15 +451,22 @@ def plan_variables(tree: PlanTree) -> set[str]:
 def _report(tree: PlanTree, built: Built) -> None:
     defined, built.scripted = _defined_variables(tree.root)
     used: dict[str, list[int]] = {}
+    where: dict[str, dict[int, list[str]]] = {}
     for index, (sampler, sub, _) in sorted(tree.samplers.items()):
-        for el in _texts(sampler, sub) + [c for c in sampler if c.get("name") == "HTTPSampler.domain"]:
+        places = _places(sampler, sub) + [(c, "host") for c in sampler if c.get("name") == "HTTPSampler.domain"]
+        for el, place in places:
             for var in _VAR_REF.findall(el.text or ""):
                 if index not in used.setdefault(var, []):
                     used[var].append(index)
+                spots = where.setdefault(var, {}).setdefault(index, [])
+                if place not in spots:
+                    spots.append(place)
     for el in _shared_header_values(tree):
         for var in _VAR_REF.findall(el.text or ""):
             used.setdefault(var, [])
+            where.setdefault(var, {}).setdefault(-1, ["headers sent by every request"])
     built.used = used
+    built.where = {var: [{"index": i, "where": spots} for i, spots in by_index.items()] for var, by_index in where.items()}
     built.unresolved = {v: i for v, i in used.items() if v not in defined and not v.startswith("COOKIE_")}
     built.empty = sorted(v for v in used if defined.get(v) == "")
 
@@ -456,18 +483,28 @@ def _hosts(tree: PlanTree, items: list[dict[str, Any]], defined: dict[str, str])
 
 def build(script: dict[str, Any], view: dict[str, Any], *, users: int = 1, ramp_up_seconds: int = 0,
           loops: int = 1, debug: bool = False, data: dict[str, bytes] | None = None,
-          settings_override: RuntimeSettings | None = None) -> Built:
-    """Build the plan for the requests and business functions in `view` (request_filter.evaluate)."""
+          settings_override: RuntimeSettings | None = None, debug_users: int = 1, debug_loops: int = 1) -> Built:
+    """Build the plan for the requests and business functions in `view` (request_filter.evaluate).
+
+    A debug build ignores users and loops: it runs `debug_users` users for `debug_loops` iterations.
+    """
     tree, built = build_tree(script, view, users=users, ramp_up_seconds=ramp_up_seconds, loops=loops,
-                             debug=debug, data=data, settings_override=settings_override)
-    xml = serialize(tree.root)
-    built.xml = xmlsafe.restore(xml) if script["source"] == "jmx" else xml
+                             debug=debug, data=data, settings_override=settings_override,
+                             debug_users=debug_users, debug_loops=debug_loops)
+    built.xml = to_xml(script, tree)
     return built
+
+
+def to_xml(script: dict[str, Any], tree: PlanTree) -> str:
+    """The .jmx text of a built tree (an imported .jmx gets its original markup back)."""
+    xml = serialize(tree.root)
+    return xmlsafe.restore(xml) if script["source"] == "jmx" else xml
 
 
 def build_tree(script: dict[str, Any], view: dict[str, Any], *, users: int = 1, ramp_up_seconds: int = 0,
                loops: int = 1, debug: bool = False, data: dict[str, bytes] | None = None,
-               settings_override: RuntimeSettings | None = None) -> tuple[PlanTree, Built]:
+               settings_override: RuntimeSettings | None = None, debug_users: int = 1,
+               debug_loops: int = 1) -> tuple[PlanTree, Built]:
     """Like build(), but return the element tree (text still holds xmlsafe markers for JMX scripts)."""
     design = ScriptDesign(**(script.get("design") or {}))
     if settings_override is not None:
@@ -486,10 +523,10 @@ def build_tree(script: dict[str, Any], view: dict[str, Any], *, users: int = 1, 
     else:
         tree = rebuild_tree(script["original"], view["transactions"])
     if debug:
-        _debug_mode(tree)
+        _debug_mode(tree, debug_users, debug_loops)
 
     built = Built(xml="", files={})
-    _replace_texts(tree, design)
+    _replace_texts(tree, design, {index: n for n, index in enumerate(view.get("order") or [])})
     for rule in design.correlations:
         if rule.source not in tree.samplers:
             built.warnings.append(f"Correlation ${{{rule.variable}}}: its source request #{rule.source} is not "
@@ -501,7 +538,14 @@ def build_tree(script: dict[str, Any], view: dict[str, Any], *, users: int = 1, 
         for source in sorted({r.source for r in design.correlations if r.source in tree.samplers}):
             _debug_variables(tree, source)
     for check in design.checks:
-        targets = [check.item] if check.item is not None else sorted(tree.samplers)
+        if check.item is not None:
+            targets = [check.item]
+        elif check.transaction:
+            targets = [i for t in view["transactions"] if t["name"].lower() == check.transaction.lower() for i in t["items"]]
+            if not targets:
+                built.warnings.append(f"Check {check.id}: there is no business function {check.transaction}.")
+        else:
+            targets = sorted(tree.samplers)
         for index in targets:
             if index in tree.samplers:
                 tree.samplers[index][1].extend([_assertion(check), ET.Element("hashTree")])
@@ -516,4 +560,23 @@ def build_tree(script: dict[str, Any], view: dict[str, Any], *, users: int = 1, 
     _report(tree, built)
     defined, _ = _defined_variables(tree.root)
     built.hosts = _hosts(tree, script["items"], defined)
+    for index, (_, sub, _) in sorted(tree.samplers.items()):
+        assertions = [c for c in sub if c.tag.endswith("Assertion") and c.get("enabled", "true") != "false"]
+        if not assertions:
+            built.unchecked.append(index)
+        elif all(a.get("testname") == STATUS_CHECK for a in assertions):
+            built.status_only.append(index)
     return tree, built
+
+
+def short_data_files(design: dict[str, Any] | ScriptDesign, users: int) -> list[str]:
+    """Data files that run out for this many users because they do not start again at the top (8.4)."""
+    d = design if isinstance(design, ScriptDesign) else ScriptDesign(**design)
+    out = []
+    for f in d.data_files:
+        if f.recycle or f.sharing == "user" or f.rows >= users:
+            continue
+        then = "stop" if f.stop_at_end else "get <EOF> instead of data"
+        out.append(f"{f.name} has {f.rows} row{'s' if f.rows != 1 else ''} for {users} users and does not start "
+                   f"again at the top: once its rows are used up, users {then}.")
+    return out

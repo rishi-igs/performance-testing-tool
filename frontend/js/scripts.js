@@ -3,8 +3,9 @@
 
 const SCRIPT_TABS = [
   ["requests", "Requests"], ["correlation", "Correlation"], ["parameters", "Parameters"],
-  ["checks", "Checks"], ["settings", "Run-time settings"], ["debug", "Debug replay"],
+  ["checks", "Checks"], ["settings", "Run-time settings"], ["validation", "Validation"], ["debug", "Debug replay"],
 ];
+const VALIDATION_BADGE = { pass: "completed", warn: "stopped", fail: "failed" };
 
 $("#importform").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -54,10 +55,11 @@ function renderScriptsHome() {
 async function openScript(id, tab = "requests", sub = null) {
   clearTimeout(state.timer);
   if (state.script !== id) {
-    state.filters = { q: "", method: "", domain: "", showExcluded: false };
+    state.filters = { q: "", method: "", domain: "", type: "", status: "", showExcluded: false };
     state.exportOpts = { users: 1, loops: 1, ramp: 0 };
     state.editing = null;
     state.debugRuns = []; state.debugRun = null; state.debugSample = null; state.autoJob = null;
+    state.validationReport = null; state.debugCompare = null; state.debugSearch = null;
   }
   state.script = id;
   state.scriptTab = SCRIPT_TABS.some(([key]) => key === tab) ? tab : "requests";
@@ -67,6 +69,7 @@ async function openScript(id, tab = "requests", sub = null) {
   }
   refreshScripts();
   if (state.scriptTab === "debug") { await loadDebug(sub); return; }
+  if (state.scriptTab === "validation") { await loadValidation(); return; }
   if (state.scriptTab === "correlation") await loadAutoJob();
   renderScriptPage();
 }
@@ -79,6 +82,7 @@ async function saveFilter(body) {
   setSaveState("Saving…");
   try {
     state.scriptView = await api(`/scripts/${state.script}/filter`, { method: "PUT", body: JSON.stringify(body) });
+    state.validationReport = null;
     renderScriptPage(key);
     setSaveState("Saved");
   } catch (e) { setSaveState(""); showError(`Not saved: ${e.message}`); }
@@ -91,6 +95,8 @@ async function saveDesign(parts) {
   try {
     state.scriptView = await api(`/scripts/${state.script}/design`, { method: "PUT", body: JSON.stringify(parts) });
     state.editing = null;
+    state.validationReport = null;
+    if (state.scriptTab === "validation") { await loadValidation(key); setSaveState("Saved"); return true; }
     renderScriptPage(key);
     setSaveState("Saved");
     return true;
@@ -117,7 +123,15 @@ function itemLabel(index) {
   return it ? `#${index} ${it.label}` : `#${index}`;
 }
 // Requests a rule can point at: kept HTTP requests, in run order.
-const keptRequests = () => state.scriptView.items.filter(i => i.include && i.kind === "http");
+const keptRequests = () => (state.scriptView.order || state.scriptView.items.map(i => i.index))
+  .map(i => state.scriptView.items[i]).filter(i => i.include && i.kind === "http");
+
+// Data files that run out for this many users (the server warns the same way for scenarios).
+function shortFiles(users) {
+  return state.scriptView.design.data_files.filter(f => !f.recycle && f.sharing !== "user" && f.rows < users)
+    .map(f => `${f.name} has ${f.rows} row${f.rows === 1 ? "" : "s"} for ${users} users and does not start again at the top: `
+      + `once its rows are used up, users ${f.stop_at_end ? "stop" : "get <EOF> instead of data"}.`);
+}
 const requestOptions = (withAll) => [...(withAll ? [["", "Every request"]] : []),
   ...keptRequests().map(i => [i.index, itemLabel(i.index)])];
 
@@ -131,13 +145,16 @@ function renderScriptPage(focusKey) {
   };
   const missing = [...Object.keys(v.unresolved || {}), ...(v.empty || [])];
   const tabs = { requests: requestsTab, correlation: correlationTab, parameters: parametersTab,
-    checks: checksTab, settings: settingsTab, debug: debugTab };
+    checks: checksTab, settings: settingsTab, validation: validationTab, debug: debugTab };
   const label = SCRIPT_TABS.find(([key]) => key === state.scriptTab)[1];
+  const cmp = v.comparison;
 
   setMain(
     h("div", { class: "head" },
       h("div", {},
-        h("h1", {}, s.name, " ", h("span", { class: "badge source" }, s.source.toUpperCase())),
+        h("h1", {}, s.name, " ", h("span", { class: "badge source" }, s.source.toUpperCase()), " ",
+          cmp ? h("a", { class: `badge ${VALIDATION_BADGE[cmp.status]}`, href: `#/scripts/${s.id}/validation`,
+            title: "HAR comparison: the plan against the recording" }, `Validation: ${cmp.label}`) : null),
         h("p", { class: "verdict" }, `${fmt(sum.captured)} captured, ${fmt(sum.kept)} kept, ${fmt(sum.excluded)} excluded · `
           + `${sum.transactions} business function${sum.transactions === 1 ? "" : "s"}`)),
       h("div", { class: "actions" },
@@ -151,7 +168,9 @@ function renderScriptPage(focusKey) {
     (v.warnings || []).map(w => h("div", { class: "warn" }, w)),
     h("nav", { class: "tabs", "aria-label": "Script sections" }, SCRIPT_TABS.map(([key, text]) =>
       h("a", { class: "tab", href: `#/scripts/${s.id}/${key}`, "aria-current": state.scriptTab === key ? "page" : null },
-        text, counts[key] != null ? h("span", { class: "count" }, fmt(counts[key])) : null))),
+        text, counts[key] != null ? h("span", { class: "count" }, fmt(counts[key])) : null,
+        key === "validation" && cmp && cmp.status !== "pass"
+          ? h("span", { class: `count ${cmp.status}` }, fmt(cmp.counts[cmp.status])) : null))),
     h("div", { class: "statusline" },
       h("div", { class: "formerror", id: "designerror", role: "alert" }),
       h("span", { class: "savestate", id: "savestate", role: "status" })),
@@ -170,7 +189,20 @@ function parseRules(text) {
   });
 }
 
-function scriptRow(it) {
+const itemType = (it) => it.resource_type || (it.mime ? it.mime.split("/").pop() : it.kind === "other" ? "JMeter" : "");
+
+// Move a request before the previous shown one (up) or after the next shown one (down).
+function moveRequest(index, delta, shown) {
+  const s = state.scriptView;
+  const visibleOrder = shown.map(i => i.index);
+  const at = visibleOrder.indexOf(index), neighbour = visibleOrder[at + delta];
+  if (neighbour == null) return;
+  const order = s.order.filter(i => i !== index);
+  order.splice(order.indexOf(neighbour) + (delta > 0 ? 1 : 0), 0, index);
+  saveFilter({ order });
+}
+
+function scriptRow(it, n, shown) {
   const why = !it.include ? (it.include_source === "manual" ? "Excluded by you" : it.auto_reason)
     : (it.include_source === "manual" && it.auto_reason ? `Kept by you (rule: ${it.auto_reason})` : null);
   const where = it.url ? urlParts(it.url) : null;
@@ -180,19 +212,24 @@ function scriptRow(it) {
     h("td", { class: "mono" }, it.method || "–"),
     h("td", { class: "urlcell" }, where ? [h("span", { class: "path" }, where.path), h("span", { class: "hostname" }, `#${it.index} · ${where.host}`)] : it.label),
     h("td", {}, it.status == null ? "–" : String(it.status)),
-    h("td", {}, it.resource_type || (it.mime ? it.mime.split("/").pop() : it.kind === "other" ? "JMeter" : "–")),
+    h("td", {}, itemType(it) || "–"),
     h("td", { class: "num" }, it.size == null ? "–" : fmtBytes(it.size)),
     h("td", { class: "num" }, it.time_ms == null ? "–" : `${fmt(it.time_ms)} ms`),
     h("td", {}, h("input", { class: "fname", value: it.transaction, list: "fnames", maxlength: 80, "data-key": `t-${it.index}`,
         "aria-label": `Business function for ${it.label}`,
         onchange: (e) => saveFilter({ changes: [{ index: it.index, transaction: e.target.value.trim() || null }] }) }),
       it.transaction_source === "auto" ? null : h("small", { class: "src" }, it.transaction_source === "rule" ? "from a rule" : "edited")),
-    h("td", { class: "reason" }, why || it.note || ""));
+    h("td", { class: "reason" }, why || it.note || ""),
+    h("td", { class: "rowactions" },
+      h("button", { class: "btn quiet small", "aria-label": `Move ${it.label} up`, "data-key": `up-${it.index}`, disabled: n === 0,
+        onclick: () => moveRequest(it.index, -1, shown) }, "↑"),
+      h("button", { class: "btn quiet small", "aria-label": `Move ${it.label} down`, "data-key": `down-${it.index}`,
+        disabled: n === shown.length - 1, onclick: () => moveRequest(it.index, 1, shown) }, "↓")));
 }
 
 function groupRow(chunk) {
   const first = chunk[0], kept = chunk.filter(i => i.include).length;
-  return h("tr", { class: "grouprow" }, h("th", { colspan: 9, scope: "colgroup" },
+  return h("tr", { class: "grouprow" }, h("th", { colspan: 10, scope: "colgroup" },
     h("div", { class: "groupline" },
       h("span", { class: "gnum" }, first.transaction_number ? pad2(first.transaction_number) : "–"),
       h("input", { class: "gname", value: first.transaction, maxlength: 80, "data-key": `g-${first.index}`,
@@ -205,8 +242,10 @@ function groupRow(chunk) {
 function requestsTab() {
   const s = state.scriptView, f = state.filters, sum = s.summary;
   const q = f.q.toLowerCase();
-  const visible = s.items.filter(i => (f.showExcluded || i.include)
+  const inRunOrder = (s.order || s.items.map(i => i.index)).map(i => s.items[i]);
+  const visible = inRunOrder.filter(i => (f.showExcluded || i.include)
     && (!f.method || i.method === f.method) && (!f.domain || i.host === f.domain)
+    && (!f.type || itemType(i) === f.type) && (!f.status || String(i.status ?? "") === f.status)
     && (!q || `${i.label} ${i.url || ""} ${i.transaction}`.toLowerCase().includes(q)));
   const chunks = [];
   for (const it of visible) {
@@ -217,9 +256,12 @@ function requestsTab() {
     ...values.map(v => h("option", { value: v, selected: v === current }, v))];
   const hosts = [...new Set(s.items.map(i => i.host).filter(Boolean))].sort();
   const methods = [...new Set(s.items.map(i => i.method).filter(Boolean))].sort();
+  const types = [...new Set(s.items.map(itemType).filter(Boolean))].sort();
+  const statuses = [...new Set(s.items.map(i => i.status).filter(x => x != null).map(String))].sort();
   const o = state.exportOpts;
   const exportInput = (label, key, max) => h("label", {}, label, h("input", { type: "number", min: key === "ramp" ? 0 : 1, max,
-    value: o[key], oninput: (e) => { o[key] = Math.max(+e.target.min, parseInt(e.target.value, 10) || 0);
+    value: o[key], "data-key": `e-${key}`, onchange: () => renderScriptPage(`e-${key}`),
+    oninput: (e) => { o[key] = Math.max(+e.target.min, parseInt(e.target.value, 10) || 0);
       const a = $("#exportlink"); if (a) a.href = exportHref(); } }));
 
   return [
@@ -230,13 +272,16 @@ function requestsTab() {
     s.source === "har" ? h("div", { class: "section" }, h("h2", {}, "Export load"),
       h("div", { class: "exportbox" },
         exportInput("Users", "users"), exportInput("Loops", "loops", 100000), exportInput("Ramp-up (s)", "ramp", 3600),
-        h("p", { class: "empty" }, "Used by Download. Imported .jmx files keep their own thread groups."))) : null,
+        h("p", { class: "empty" }, "Used by Download. Imported .jmx files keep their own thread groups.")),
+      shortFiles(o.users).map(t => h("div", { class: "warn" }, t))) : null,
 
     h("div", { class: "toolbar" },
       h("label", {}, "Search", h("input", { type: "search", value: f.q, "data-key": "f-q", placeholder: "URL or function",
         oninput: (e) => { f.q = e.target.value; renderScriptPage("f-q"); } })),
       h("label", {}, "Method", h("select", { "data-key": "f-m", onchange: (e) => { f.method = e.target.value; renderScriptPage("f-m"); } }, options(methods, f.method))),
       h("label", {}, "Domain", h("select", { "data-key": "f-d", onchange: (e) => { f.domain = e.target.value; renderScriptPage("f-d"); } }, options(hosts, f.domain))),
+      h("label", {}, "Type", h("select", { "data-key": "f-t", onchange: (e) => { f.type = e.target.value; renderScriptPage("f-t"); } }, options(types, f.type))),
+      h("label", {}, "Status", h("select", { "data-key": "f-s", onchange: (e) => { f.status = e.target.value; renderScriptPage("f-s"); } }, options(statuses, f.status))),
       h("label", { class: "check" }, h("input", { type: "checkbox", checked: f.showExcluded, "data-key": "f-x",
         onchange: (e) => { f.showExcluded = e.target.checked; renderScriptPage("f-x"); } }), `Show excluded (${fmt(sum.excluded)})`)),
 
@@ -246,13 +291,17 @@ function requestsTab() {
       h("button", { class: "btn quiet small", onclick: () => saveFilter({ changes: visible.map(i => ({ index: i.index, include: false })) }) }, "Exclude all shown"),
       h("button", { class: "btn quiet small", onclick: () => saveFilter({ changes: visible.map(i => ({ index: i.index, include: null, transaction: null })) }) }, "Reset shown to automatic"),
       h("button", { class: "btn quiet small", "aria-pressed": String(s.rules.keep_only_api),
-        onclick: () => saveFilter({ rules: { ...s.rules, keep_only_api: !s.rules.keep_only_api } }) }, "Keep API calls only")),
+        onclick: () => saveFilter({ rules: { ...s.rules, keep_only_api: !s.rules.keep_only_api } }) }, "Keep API calls only"),
+      h("button", { class: "btn quiet small", "aria-pressed": String(!!s.rules.exclude_repeated_polling),
+        onclick: () => saveFilter({ rules: { ...s.rules, exclude_repeated_polling: !s.rules.exclude_repeated_polling } }) },
+        "Leave out repeated polling"),
+      s.reordered ? h("button", { class: "btn quiet small", onclick: () => saveFilter({ order: [] }) }, "Back to the recorded order") : null),
 
     h("div", { class: "tablewrap" }, h("table", { class: "reqs" },
-      h("thead", {}, h("tr", {}, ["Keep", "Method", "Request", "Status", "Type", "Size", "Time", "Business function", "Why"]
+      h("thead", {}, h("tr", {}, ["Keep", "Method", "Request", "Status", "Type", "Size", "Time", "Business function", "Why", "Order"]
         .map(t => h("th", { scope: "col" }, t)))),
-      h("tbody", {}, visible.length ? chunks.flatMap(c => [groupRow(c), ...c.map(scriptRow)])
-        : h("tr", {}, h("td", { colspan: 9, class: "empty" }, "No requests match these filters."))))),
+      h("tbody", {}, visible.length ? chunks.flatMap(c => [groupRow(c), ...c.map(it => scriptRow(it, visible.indexOf(it), visible))])
+        : h("tr", {}, h("td", { colspan: 10, class: "empty" }, "No requests match these filters."))))),
     h("datalist", { id: "fnames" }, [...new Set(s.items.map(i => i.transaction))].map(n => h("option", { value: n }))),
 
     h("details", { class: "rules section", open: state.rulesOpen, ontoggle: (e) => { state.rulesOpen = e.target.open; } },

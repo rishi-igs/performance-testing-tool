@@ -17,7 +17,7 @@ from starlette.concurrency import run_in_threadpool
 from ..deps import audit, ensure_project, project_filter, target_project, tester
 from ..deps import viewer as require_api_key
 from ..models.script import CorrelationRule, DataFile, DesignUpdate, FilterRules, ScriptDesign, ScriptUpdate
-from ..services import autocorrelate, request_filter, script_builder
+from ..services import autocorrelate, har_validator, request_filter, script_builder
 from ..services.har_parser import ImportFailed, parse_har
 from ..services.jmx_importer import parse_jmx
 from ..services.test_executor import run_paths
@@ -37,26 +37,36 @@ def get_script_or_404(request: Request, script_id: str) -> dict[str, Any]:
 
 def evaluate(script: dict[str, Any]) -> tuple[FilterRules, dict[str, Any]]:
     rules = FilterRules(**script["rules"])
-    return rules, request_filter.evaluate(script["source"], script["items"], rules, script["overrides"])
+    return rules, request_filter.evaluate(script["source"], script["items"], rules, script["overrides"],
+                                          script.get("order"))
+
+
+def validation_report(state: Any, script: dict[str, Any], *, reveal: bool = False) -> dict[str, Any]:
+    """The HAR comparison validator's full report for the script as it is now (requirements 8.5)."""
+    _, view = evaluate(script)
+    if not view["transactions"]:
+        raise HTTPException(422, "Nothing to validate: every request is excluded.")
+    tree, built = script_builder.build_tree(script, view, data=state.db.script_files(script["id"]))
+    return har_validator.validate(script, view, tree, built, reveal=reveal)
 
 
 def _detail(request: Request, script: dict[str, Any]) -> dict[str, Any]:
     rules, view = evaluate(script)
     design = ScriptDesign(**script["design"])
+    position = {index: n for n, index in enumerate(view["order"])}
     files = request.app.state.db.script_files(script["id"])
-    validation: dict[str, Any] = {"unresolved": {}, "used": {}, "empty": [], "scripted": False, "warnings": []}
+    validation: dict[str, Any] = {"unresolved": {}, "used": {}, "where": {}, "empty": [], "scripted": False,
+                                  "warnings": [], "status_only_checks": [], "unchecked": [], "comparison": None}
     if view["transactions"]:
         try:
-            built = script_builder.build(script, view, data=files)
-            validation = {"unresolved": built.unresolved, "used": built.used, "empty": built.empty,
-                          "scripted": built.scripted, "warnings": built.warnings}
+            tree, built = script_builder.build_tree(script, view, data=files)
+            validation.update(unresolved=built.unresolved, used=built.used, where=built.where, empty=built.empty,
+                              scripted=built.scripted, warnings=built.warnings, status_only_checks=built.status_only,
+                              unchecked=built.unchecked)
+            validation["comparison"] = har_validator.brief(har_validator.validate(script, view, tree, built))
         except Exception as exc:  # noqa: BLE001 - the review screen must still open
             log.exception("building script %s failed", script["id"])
             validation["warnings"] = [f"The plan could not be built: {exc}"]
-    checked = {c.item for c in design.checks if c.item is not None}
-    has_global_check = any(c.item is None for c in design.checks)
-    status_only = [] if has_global_check else [
-        v["index"] for v in view["items"] if v["include"] and v["kind"] == "http" and v["index"] not in checked]
     return {
         "id": script["id"], "name": script["name"], "source": script["source"], "project_id": script.get("project_id"),
         "created_by": script["created_by"], "created_at": script["created_at"], "updated_at": script["updated_at"],
@@ -66,22 +76,23 @@ def _detail(request: Request, script: dict[str, Any]) -> dict[str, Any]:
             {"number": t["number"], "name": t["name"], "thread_group": t["thread_group"], "requests": len(t["items"])}
             for t in view["transactions"]
         ],
-        "items": [_with_replacements(v, design) for v in view["items"]],
+        "items": [_with_replacements(v, design, position) for v in view["items"]],
+        "order": view["order"], "reordered": view["reordered"],
         "design": design.model_dump(),
         "suggestions": script.get("suggestions") or {},
-        "validation": {**validation, "status_only_checks": status_only},
+        "validation": validation,
         "files": [{"name": n, "bytes": len(c)} for n, c in sorted(files.items())],
     }
 
 
-def _with_replacements(view_item: dict[str, Any], design: ScriptDesign) -> dict[str, Any]:
+def _with_replacements(view_item: dict[str, Any], design: ScriptDesign, position: dict[int, int]) -> dict[str, Any]:
     """Show the URL as it will be sent: recorded text replaced by ${variables}."""
     url = view_item.get("url")
     if url:
         for r in design.replacements:
             url, _ = script_builder.replace_value(url, r.find, r.variable)
         for c in design.correlations:
-            if c.replace and view_item["index"] > c.source:
+            if c.replace and position.get(view_item["index"], 0) > position.get(c.source, 0):
                 url, _ = script_builder.replace_value(url, c.replace, c.variable)
     return {**view_item, "url": url}
 
@@ -213,6 +224,26 @@ def get_script(script_id: str, request: Request, _: str = Depends(require_api_ke
     return _detail(request, get_script_or_404(request, script_id))
 
 
+@router.get("/{script_id}/validation")
+def get_validation(script_id: str, request: Request,
+                   reveal: bool = Query(False, description="show recorded secrets unmasked (testers)"),
+                   who: Any = Depends(require_api_key)):
+    """Compare every kept request with the plan: Pass, Pass with warnings or Fail (requirements 8.5)."""
+    script = get_script_or_404(request, script_id)
+    if reveal and not who.can("tester"):
+        raise HTTPException(403, "Showing recorded values needs the tester role")
+    report = validation_report(request.app.state, script, reveal=reveal)
+    if reveal:
+        audit.info("REVEAL validation script=%s by=%s", script_id, who)
+    return report
+
+
+@router.post("/{script_id}/validate")
+def validate(script_id: str, request: Request, reveal: bool = Query(False), who: Any = Depends(require_api_key)):
+    """The same report as GET /validation (the API name in the requirements)."""
+    return get_validation(script_id, request, reveal, who)
+
+
 @router.put("/{script_id}/filter")
 def update_filter(script_id: str, update: ScriptUpdate, request: Request, who: str = Depends(tester)):
     """Save include/exclude choices and business-function names, and optionally replace the rules."""
@@ -220,8 +251,14 @@ def update_filter(script_id: str, update: ScriptUpdate, request: Request, who: s
     for change in update.changes:
         if change.index >= script["request_count"]:
             raise HTTPException(422, f"Request {change.index} does not exist in this script")
+    if update.order:
+        if sorted(update.order) != list(range(script["request_count"])):
+            raise HTTPException(422, f"order must list each request index 0..{script['request_count'] - 1} once")
 
-    def mutate(rules: dict[str, Any], overrides: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    def mutate(rules: dict[str, Any], overrides: dict[str, Any],
+               order: list[int]) -> tuple[dict[str, Any], dict[str, Any], list[int]]:
+        if update.order is not None:
+            order = [] if update.order == list(range(script["request_count"])) else update.order
         if update.rules is not None:
             rules = update.rules.model_dump()
         for change in update.changes:
@@ -240,7 +277,7 @@ def update_filter(script_id: str, update: ScriptUpdate, request: Request, who: s
                     edit.pop("transaction", None)
             if not edit:
                 overrides.pop(key)
-        return rules, overrides
+        return rules, overrides, order
 
     if not request.app.state.db.update_script(script_id, mutate):
         raise HTTPException(404, f"Script '{script_id}' not found")
@@ -265,7 +302,9 @@ def update_design(script_id: str, update: DesignUpdate, request: Request, who: s
         for f in update.data_files:
             if f.name not in existing:
                 raise HTTPException(422, f"Data file {f.name} was not uploaded")
+            # Rows, columns and delimiter come from the uploaded file: upload it again to change them.
             f.rows = existing[f.name].get("rows", 0)
+            f.delimiter = existing[f.name].get("delimiter", ",")
     changes = update.model_dump(exclude_unset=True)
 
     def mutate(current: dict[str, Any]) -> dict[str, Any]:
@@ -288,6 +327,7 @@ def _validation_message(exc: ValidationError) -> str:
 async def upload_data_file(script_id: str, request: Request,
                            name: str = Query(..., pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,79}\.(csv|txt)$"),
                            header: bool = Query(True, description="first line holds the column names"),
+                           delimiter: str = Query(",", pattern=r"^(,|;|\||tab)$", description=", ; | or tab"),
                            who: str = Depends(tester)):
     """Upload a CSV of test data as the raw request body; each column becomes a ${variable}."""
     get_script_or_404(request, script_id)
@@ -296,7 +336,8 @@ async def upload_data_file(script_id: str, request: Request,
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         raise HTTPException(422, "The data file must be UTF-8 text") from exc
-    rows = [r for r in csv.reader(io.StringIO(text)) if any(cell.strip() for cell in r)]
+    sep = "\t" if delimiter == "tab" else delimiter
+    rows = [r for r in csv.reader(io.StringIO(text), delimiter=sep) if any(cell.strip() for cell in r)]
     if not rows:
         raise HTTPException(422, "The data file has no rows")
     stem = re.sub(r"[^A-Za-z0-9_]", "_", name.rsplit(".", 1)[0])
@@ -314,7 +355,7 @@ async def upload_data_file(script_id: str, request: Request,
         files = [f for f in design.get("data_files", []) if f["name"] != name]
         previous = next((f for f in design.get("data_files", []) if f["name"] == name), {})
         files.append(DataFile(**{**previous, "name": name, "columns": columns, "rows": data_rows,
-                                 "first_line_header": header}).model_dump())
+                                 "first_line_header": header, "delimiter": sep}).model_dump())
         try:
             return ScriptDesign(**{**design, "data_files": files}).model_dump()
         except ValidationError as exc:

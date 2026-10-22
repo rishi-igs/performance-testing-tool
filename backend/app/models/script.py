@@ -53,6 +53,7 @@ class FilterRules(BaseModel):
     exclude_domains: list[str] = Field(default_factory=lambda: list(DEFAULT_DOMAINS), max_length=500)
     exclude_methods: list[str] = Field(default_factory=lambda: ["OPTIONS"], max_length=20)
     keep_only_api: bool = False
+    exclude_repeated_polling: bool = False      # GETs to one URL seen 3+ times: keep the first
     # A new business function starts after this much idle time (HAR only). 0 turns it off.
     # 5 s matches JMeter's recorder default (proxy.pause=5000).
     idle_gap_seconds: float = Field(5, ge=0, le=600)
@@ -89,6 +90,8 @@ class ScriptUpdate(BaseModel):
 
     changes: list[RequestChange] = Field(default_factory=list, max_length=20_000)
     rules: FilterRules | None = None
+    order: list[int] | None = Field(default=None, max_length=20_000,
+                                    description="request indexes in run order; [] returns to the recorded order")
 
 
 # ---- Script design: what VuGen calls correlation, parameters, checks and run-time settings ----
@@ -168,6 +171,7 @@ class DataFile(BaseModel):
     recycle: bool = True
     stop_at_end: bool = False
     first_line_header: bool = True
+    delimiter: Literal[",", ";", "\t", "|"] = ","
     rows: int = 0
 
 
@@ -187,6 +191,8 @@ class Check(BaseModel):
 
     id: str | None = None
     item: int | None = Field(default=None, ge=0, description="request index; empty = every request")
+    transaction: str | None = Field(default=None, max_length=80,
+                                    description="every request of this business function (instead of item)")
     type: Literal["text", "not_text", "regex", "json_path", "header", "duration", "size_max"]
     value: str | None = Field(default=None, max_length=5000)
     path: str | None = Field(default=None, max_length=500)
@@ -195,6 +201,10 @@ class Check(BaseModel):
 
     @model_validator(mode="after")
     def _check(self) -> "Check":
+        if self.transaction is not None:
+            self.transaction = self.transaction.strip() or None
+        if self.item is not None and self.transaction:
+            raise ValueError("a check is on one request or on a business function, not both")
         needs = {"text": "value", "not_text": "value", "regex": "value", "header": "value",
                  "json_path": "path", "duration": "limit", "size_max": "limit"}[self.type]
         if getattr(self, needs) in (None, ""):
@@ -258,6 +268,8 @@ class ScriptDesign(BaseModel):
     replacements: list[Replacement] = Field(default_factory=list, max_length=2000)
     checks: list[Check] = Field(default_factory=list, max_length=5000)
     settings: RuntimeSettings = Field(default_factory=RuntimeSettings)
+    # Recorded values that look dynamic but are fine to replay as recorded (the validator accepts them).
+    static_values: list[Annotated[str, Field(min_length=1, max_length=4096)]] = Field(default_factory=list, max_length=2000)
 
     @model_validator(mode="after")
     def _check(self) -> "ScriptDesign":
@@ -296,3 +308,4 @@ class DesignUpdate(BaseModel):
     replacements: list[Replacement] | None = None
     checks: list[Check] | None = None
     settings: RuntimeSettings | None = None
+    static_values: list[Annotated[str, Field(min_length=1, max_length=4096)]] | None = Field(None, max_length=2000)

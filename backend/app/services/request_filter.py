@@ -5,7 +5,8 @@ For every request the tool decides:
   transaction  your manual name, otherwise the first matching transaction rule, otherwise
                an automatic name (HAR: a new group on each page navigation or idle gap;
                JMX: the controller the sampler was in)
-Kept requests that follow each other with the same name form one Transaction Controller.
+Requests run in the recorded order unless you moved them. Kept requests that follow each other
+with the same name form one Transaction Controller.
 """
 from __future__ import annotations
 
@@ -59,7 +60,22 @@ def _is_api(item: dict[str, Any]) -> bool | None:
     return item.get("method") not in {None, "GET", "HEAD"}
 
 
-def auto_reason(item: dict[str, Any], rules: FilterRules) -> str | None:
+POLLING_REPEATS = 3
+
+
+def _polling(items: list[dict[str, Any]]) -> set[int]:
+    """Repeats of a GET to the same URL seen at least POLLING_REPEATS times (polling, heartbeats).
+
+    The first call of each stays, so the flow still makes it once.
+    """
+    seen: dict[str, list[int]] = {}
+    for item in items:
+        if item["kind"] == "http" and (item.get("method") or "GET") == "GET" and item.get("url"):
+            seen.setdefault(item["url"], []).append(item["index"])
+    return {i for indexes in seen.values() if len(indexes) >= POLLING_REPEATS for i in indexes[1:]}
+
+
+def auto_reason(item: dict[str, Any], rules: FilterRules, polling: set[int] = frozenset()) -> str | None:
     """Why the rules exclude this request, or None if they keep it."""
     if item.get("disabled"):
         return "Disabled in the imported plan"
@@ -86,6 +102,8 @@ def auto_reason(item: dict[str, Any], rules: FilterRules) -> str | None:
         return f"Static content ({mime})"
     if rules.keep_only_api and _is_api(item) is False:
         return "Not an API call"
+    if rules.exclude_repeated_polling and item["index"] in polling:
+        return "Repeated polling or heartbeat (the first call is kept)"
     return None
 
 
@@ -141,9 +159,17 @@ def _jmx_names(items: list[dict[str, Any]]) -> list[str]:
     return names
 
 
+def run_order(count: int, order: list[int] | None) -> list[int]:
+    """Request indexes in the order they run: a saved order (moves), then any it does not list."""
+    listed = [i for i in dict.fromkeys(order or []) if 0 <= i < count]
+    known = set(listed)
+    return listed + [i for i in range(count) if i not in known]
+
+
 def evaluate(source: str, items: list[dict[str, Any]], rules: FilterRules,
-             overrides: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    reasons = [auto_reason(item, rules) for item in items]
+             overrides: dict[str, dict[str, Any]], order: list[int] | None = None) -> dict[str, Any]:
+    polling = _polling(items) if rules.exclude_repeated_polling else set()
+    reasons = [auto_reason(item, rules, polling) for item in items]
     auto_names = _har_names(items, reasons, rules.idle_gap_seconds) if source == "har" else _jmx_names(items)
 
     views: list[dict[str, Any]] = []
@@ -167,9 +193,11 @@ def evaluate(source: str, items: list[dict[str, Any]], rules: FilterRules,
             "transaction_number": None,
         })
 
+    sequence = run_order(len(items), order)
     transactions: list[dict[str, Any]] = []
     previous = None
-    for item, view in zip(items, views):
+    for index in sequence:
+        item, view = items[index], views[index]
         if not view["include"]:
             continue
         key = (item.get("thread_group", 0), view["transaction"])
@@ -182,7 +210,9 @@ def evaluate(source: str, items: list[dict[str, Any]], rules: FilterRules,
 
     kept = sum(1 for v in views if v["include"])
     return {
-        "items": views,
+        "items": views,                  # by request index
+        "order": sequence,               # request indexes in run order
+        "reordered": sequence != list(range(len(items))),
         "transactions": transactions,
         "summary": {"captured": len(items), "kept": kept, "excluded": len(items) - kept,
                     "transactions": len(transactions)},

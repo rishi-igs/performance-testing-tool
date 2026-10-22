@@ -55,6 +55,26 @@ class Recorder:
                                    "entries": self.entries}}).encode()
 
 
+def record_demo_flow(base_url: str) -> bytes:
+    """The /demo page's requests, in the order its script makes them: sign in, then place an order."""
+    rec = Recorder(base_url)
+    _, _, page = rec.request("GET", "/demo")
+    csrf = page.split('name="csrf-token" content="')[1].split('"')[0]
+    _, _, login = rec.request("POST", "/login", body='{"username": "demo.user", "password": "demo-pass-123"}',
+                              content_type="application/json", pause_ms=4000)
+    bearer = {"Authorization": f"Bearer {json.loads(login)['token']}"}
+    rec.request("GET", "/private", headers=bearer)
+    rec.request("GET", "/xsrf")
+    _, _, order = rec.request("GET", "/api/orders/new", headers=bearer, pause_ms=6000)
+    order_id = json.loads(order)["order"]["id"]
+    rec.request("GET", f"/api/orders/{order_id}", headers=bearer)
+    rec.request("POST", "/page/submit", body=f"csrf={csrf}&item=lamp", content_type="application/x-www-form-urlencoded")
+    rec.request("POST", "/xsrf/submit", headers={"X-XSRF-TOKEN": rec.cookies["XSRF-TOKEN"]},
+                body=json.dumps({"order": order_id}), content_type="application/json")
+    assert all(e["response"]["status"] < 400 for e in rec.entries), [e["response"]["status"] for e in rec.entries]
+    return rec.har()
+
+
 def record_correlation_flow(base_url: str) -> bytes:
     """A flow with five values the server issues: CSRF, login token, order id, redirect code, XSRF cookie."""
     rec = Recorder(base_url)

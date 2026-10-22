@@ -209,8 +209,28 @@
   .diagnosis { background: var(--warn-bg); border-left: 4px solid var(--warn); border-radius: 6px; padding: 10px 12px; }
   .diagnosis p { margin: 2px 0; }
   .pane h3 { font-size: 14px; margin-bottom: 4px; }
-  pre.code { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; max-height: 320px;
+  pre.code, div.code { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; max-height: 320px;
     overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 6px 0 0; }
+  div.code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+  mark { background: #ffe58a; color: inherit; border-radius: 2px; }
+
+  /* Validation (HAR comparison) */
+  .sidebyside { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .sidebyside .pane { min-width: 0; }
+  .diffline { border-radius: 3px; padding: 0 3px; margin: 0 -3px; }
+  .diffline.missing, .diffline.unresolved { background: var(--fail-bg); }
+  .diffline.extra, .diffline.changed { background: var(--warn-bg); }
+  .diffline.variable { background: var(--accent-soft); }
+  .dtype { display: inline-block; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em;
+    padding: 0 6px; border-radius: 4px; border: 1px solid var(--line); background: var(--surface); }
+  .dtype.missing, .dtype.unresolved { color: var(--fail); border-color: var(--fail); }
+  .dtype.extra, .dtype.changed { color: #7a4e00; border-color: var(--warn); }
+  .dtype.variable { color: #0b5a73; border-color: var(--accent); }
+  ul.problems li.warnline { border-left: 4px solid var(--warn); }
+  .tab .count.warn { background: var(--warn-bg); color: #7a4e00; }
+  .tab .count.fail { background: var(--fail-bg); color: var(--fail); }
+  a.badge { text-decoration: none; }
+  @media (max-width: 900px) { .sidebyside { grid-template-columns: 1fr; } }
 
   @media (max-width: 900px) {
     .app { grid-template-columns: 1fr; }
@@ -341,6 +361,7 @@
 <script src="/js/scripts.js"></script>
 <script src="/js/design.js"></script>
 <script src="/js/debug.js"></script>
+<script src="/js/validation.js"></script>
 <script src="/js/scenarios.js"></script>
 <script src="/js/results.js"></script>
 <script src="/js/analysis.js"></script>

@@ -5,8 +5,10 @@ const $ = (sel) => document.querySelector(sel);
 const state = {
   section: "quick", selected: null, runs: [], charts: {}, timer: null,
   script: null, scripts: [], scriptView: null, scriptTab: "requests", rulesOpen: false,
-  filters: { q: "", method: "", domain: "", showExcluded: false }, exportOpts: { users: 1, loops: 1, ramp: 0 },
+  filters: { q: "", method: "", domain: "", type: "", status: "", showExcluded: false }, exportOpts: { users: 1, loops: 1, ramp: 0 },
   editing: null, debugRuns: [], debugRun: null, debugSample: null, debugReveal: false, debugFailedOnly: false,
+  debugOpts: { users: 1, iterations: 1 }, debugSearch: null, debugCompare: null,
+  validationReport: null, validationReveal: false, validationOpen: null, validationDiffOnly: false,
   scenarios: [], scenarioId: null, scenario: null, draft: null, preview: null, scriptInfo: {}, runId: null,
   analysis: null, me: null, project: null, team: null, tokens: [], schedules: [], trends: null, autoJob: null,
   scheduleDraft: { repeat: "daily" },
@@ -48,7 +50,8 @@ function ago(iso) {
 }
 
 function urlParts(u) {
-  try { const x = new URL(u); return { host: x.host, path: x.pathname + x.search }; }
+  const readable = (p) => { try { return decodeURI(p); } catch (_) { return p; } };   // ${id}, not $%7Bid%7D
+  try { const x = new URL(u); return { host: x.host, path: readable(x.pathname) + x.search }; }
   catch (_) { return { host: "", path: u }; }
 }
 

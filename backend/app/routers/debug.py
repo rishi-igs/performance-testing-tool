@@ -15,13 +15,14 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 
 from ..config import Settings
 from ..db import now_iso
 from ..deps import audit, ensure_project, tester
 from ..deps import viewer as require_api_key
 from ..models.script import ScriptDesign
-from ..services import autocorrelate, debug_runner, script_builder
+from ..services import autocorrelate, debug_runner, har_validator, script_builder
 from ..services.security import TargetNotAllowed, check_target
 from ..services.test_executor import Outcome, TooManyTests, finish_status, run_paths
 from .scripts import evaluate, get_script_or_404
@@ -45,28 +46,40 @@ def check_hosts(settings: Settings, hosts: list[str], who: str) -> None:
             raise HTTPException(422, f"{host}: {exc}") from exc
 
 
-def _replay_plan(state: Any, script: dict[str, Any], who: str, *, keep_going: bool):
+def _replay_plan(state: Any, script: dict[str, Any], who: str, *, keep_going: bool, users: int = 1, iterations: int = 1):
     _, view = evaluate(script)
     if not view["transactions"]:
         raise HTTPException(422, "Nothing to replay: every request is excluded.")
     override = None
     if keep_going:          # a scan needs every response, so carry on after a failed request
         override = ScriptDesign(**script["design"]).settings.model_copy(update={"on_error": "continue"})
-    built = script_builder.build(script, view, debug=True, data=state.db.script_files(script["id"]),
-                                 settings_override=override)
+    tree, built = script_builder.build_tree(script, view, debug=True, debug_users=users, debug_loops=iterations,
+                                            data=state.db.script_files(script["id"]), settings_override=override)
+    # The HAR comparison validator runs before every replay (requirements 8.5); its result is kept with it.
+    try:
+        validation = har_validator.brief(har_validator.validate(script, view, tree, built))
+    except Exception:  # noqa: BLE001 - a replay is how problems are found, so it still runs
+        log.exception("validating script %s failed", script["id"])
+        validation = None
+    built.xml = script_builder.to_xml(script, tree)
     check_hosts(state.settings, built.hosts, who)
-    return view, built
+    return view, built, validation
 
 
-def launch_debug_run(state: Any, script: dict[str, Any], who: str, *, keep_going: bool = False) -> str:
+def launch_debug_run(state: Any, script: dict[str, Any], who: str, *, keep_going: bool = False,
+                     users: int = 1, iterations: int = 1) -> str:
     """Start a debug replay of the script as it is now; return the run id."""
-    view, built = _replay_plan(state, script, who, keep_going=keep_going)
+    view, built, validation = _replay_plan(state, script, who, keep_going=keep_going, users=users, iterations=iterations)
+    warnings = list(built.warnings)
+    if users > 1:
+        warnings += script_builder.short_data_files(script["design"], users)
     script_id = script["id"]
     run_id = f"d_{uuid.uuid4().hex[:10]}"
     state.db.insert_debug_run(run_id, script_id, who)
 
     def finish(rid: str, outcome: Outcome) -> None:
-        summary = debug_runner.summarize(outcome.paths["jtl"], script, view, built.unresolved, built.warnings)
+        summary = debug_runner.summarize(outcome.paths["jtl"], script, view, built.unresolved, warnings, built.used)
+        summary.update(users=users, iterations=iterations, validation=validation)
         status, error = finish_status(outcome, has_results=any(i["state"] == "ran" for i in summary["items"]))
         state.db.update_debug_run(rid, status=status, error=error, exit_code=outcome.exit_code,
                                   finished_at=now_iso(), summary_json=json.dumps(summary))
@@ -85,8 +98,13 @@ def launch_debug_run(state: Any, script: dict[str, Any], who: str, *, keep_going
 
 
 @router.post("/scripts/{script_id}/debug-run", status_code=201)
-def start_debug_run(script_id: str, request: Request, who: str = Depends(tester)):
-    run_id = launch_debug_run(request.app.state, get_script_or_404(request, script_id), who)
+def start_debug_run(script_id: str, request: Request,
+                    users: int = Query(1, ge=1, le=debug_runner.MAX_USERS),
+                    iterations: int = Query(1, ge=1, le=debug_runner.MAX_ITERATIONS),
+                    who: str = Depends(tester)):
+    """Replay the script once with one user, or with a few users or iterations (at most 5 each)."""
+    run_id = launch_debug_run(request.app.state, get_script_or_404(request, script_id), who,
+                              users=users, iterations=iterations)
     return {"id": run_id, "status": "running"}
 
 
@@ -94,7 +112,8 @@ def _brief(run: dict[str, Any]) -> dict[str, Any]:
     s = run.get("summary") or {}
     return {k: run[k] for k in ("id", "script_id", "status", "created_at", "started_at", "finished_at", "error")} | {
         "verdict": s.get("verdict"), "passed": s.get("passed"), "failed": s.get("failed"),
-        "first_failure": s.get("first_failure"),
+        "first_failure": s.get("first_failure"), "users": s.get("users", 1), "iterations": s.get("iterations", 1),
+        "validation": (s.get("validation") or {}).get("status"),
     }
 
 
@@ -120,18 +139,50 @@ def get_debug_run(run_id: str, request: Request, _: str = Depends(require_api_ke
 
 @router.get("/debug-runs/{run_id}/samples/{index}")
 def get_debug_sample(run_id: str, index: int, request: Request,
-                     reveal: bool = Query(False, description="show credential headers unmasked"),
+                     reveal: bool = Query(False, description="show credentials and tokens unmasked"),
+                     occurrence: int = Query(0, ge=0, description="which result of this request (several users or iterations)"),
                      who: str = Depends(require_api_key)):
     _get_run(request, run_id)
     if reveal and not who.can("tester"):
         raise HTTPException(403, "Showing credentials needs the tester role")
     path = run_paths(request.app.state.settings, run_id)["jtl"]
-    detail = debug_runner.sample_detail(path, index, reveal=reveal)
+    detail = debug_runner.sample_detail(path, index, reveal=reveal, occurrence=occurrence)
     if detail is None:
-        raise HTTPException(404, f"Request #{index} has no result in this debug run")
+        raise HTTPException(404, f"Request #{index} has no result {occurrence + 1} in this debug run")
     if reveal:
         audit.info("REVEAL debug=%s request=%d by=%s", run_id, index, who)
     return detail
+
+
+@router.get("/debug-runs/{run_id}/search")
+def search_debug_run(run_id: str, request: Request, q: str = Query(..., min_length=1, max_length=200),
+                     reveal: bool = Query(False), who: str = Depends(require_api_key)):
+    """Requests whose URL, headers or bodies contain the text (searched as shown: masked unless revealed)."""
+    _get_run(request, run_id)
+    if reveal and not who.can("tester"):
+        raise HTTPException(403, "Searching unmasked values needs the tester role")
+    return {"q": q, "hits": debug_runner.search(run_paths(request.app.state.settings, run_id)["jtl"], q, reveal=reveal)}
+
+
+@router.get("/debug-runs/{run_id}/jmeter.log")
+def debug_log(run_id: str, request: Request, _: str = Depends(require_api_key)):
+    """JMeter's own log of the replay."""
+    _get_run(request, run_id)
+    path = run_paths(request.app.state.settings, run_id)["log"]
+    if not path.exists():
+        raise HTTPException(404, "This debug run has no JMeter log")
+    return FileResponse(path, media_type="text/plain", filename=f"{run_id}-jmeter.log")
+
+
+@router.get("/debug-runs/{run_id}/results.xml")
+def debug_results(run_id: str, request: Request, who: str = Depends(tester)):
+    """The raw results file (JMeter's XML JTL). It holds every request and response unmasked."""
+    _get_run(request, run_id)
+    path = run_paths(request.app.state.settings, run_id)["jtl"]
+    if not path.exists():
+        raise HTTPException(404, "This debug run has no results file")
+    audit.info("DOWNLOAD debug results=%s by=%s", run_id, who)
+    return FileResponse(path, media_type="application/xml", filename=f"{run_id}-results.jtl")
 
 
 # ---- correlate automatically ------------------------------------------------------------------------

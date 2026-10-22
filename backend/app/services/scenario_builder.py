@@ -24,7 +24,7 @@ from ..models.script import FilterRules
 from . import load_profile, request_filter, xmlsafe
 from .jmeter_plan_builder import _element, _prop, _test_plan, add_variable, serialize
 from .load_profile import Cohort
-from .script_builder import _pause, _regular_thread_groups, build_tree
+from .script_builder import _pause, _regular_thread_groups, build_tree, short_data_files
 
 MAX_COHORTS = 10
 LISTENERS = {"ResultCollector", "BackendListener", "Summariser"}
@@ -206,13 +206,14 @@ def build_scenario(cfg: ScenarioConfig, scripts: dict[str, dict[str, Any]],
         if script is None:
             raise ScenarioError(f"Group {group.name}: script {group.script_id} no longer exists")
         rules = FilterRules(**script["rules"])
-        view = request_filter.evaluate(script["source"], script["items"], rules, script["overrides"])
+        view = request_filter.evaluate(script["source"], script["items"], rules, script["overrides"],
+                                       script.get("order"))
         if not view["transactions"]:
             raise ScenarioError(f"Group {group.name}: the script has no kept requests")
         tree, built = build_tree(script, view, data=files_by_script.get(group.script_id, {}),
                                  settings_override=group.settings)
         hosts |= set(built.hosts)
-        warnings += [f"{group.name}: {w}" for w in built.warnings]
+        warnings += [f"{group.name}: {w}" for w in built.warnings + short_data_files(script["design"], users)]
         missing = sorted(built.unresolved) + built.empty
         if missing:
             warnings.append(f"{group.name}: these variables have no value: " + ", ".join(f"${{{v}}}" for v in missing))

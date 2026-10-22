@@ -161,8 +161,8 @@ process.on("unhandledRejection", (e) => { failures.push(`unhandled: ${e && e.sta
 
 // ---- the scenario ---------------------------------------------------------------------------
 (async () => {
-  for (const file of ["core.js", "quick.js", "scripts.js", "design.js", "debug.js", "scenarios.js", "results.js", "analysis.js",
-    "infra.js", "schedules.js", "team.js", "app.js"]) {
+  for (const file of ["core.js", "quick.js", "scripts.js", "design.js", "debug.js", "validation.js", "scenarios.js", "results.js",
+    "analysis.js", "infra.js", "schedules.js", "team.js", "app.js"]) {
     vm.runInThisContext(fs.readFileSync(path.join(__dirname, "..", "js", file), "utf8"), { filename: file });
   }
   const sid = SCRIPT_ID;
@@ -170,6 +170,16 @@ process.on("unhandledRejection", (e) => { failures.push(`unhandled: ${e && e.sta
   await waitFor(() => text(main).includes("10 captured, 10 kept"), "the Requests tab shows the import summary");
   check(text(document.getElementById("scripts")).includes("REQUESTS") || text(document.getElementById("scripts")).includes("requests"), "the rail lists imported scripts");
   check(!scripts.hidden && quick.hidden, "the Scripts section is shown");
+  check(text(main).includes("Validation: Pass"), "the script page shows the validation result");
+
+  // ---- move a request down, then back to the recorded order ----
+  click(within(main, e => e.tag === "button" && e.attrs["aria-label"] === "Move GET /page/form down")[0]);
+  await waitFor(() => !!byText(main, "button", "Back to the recorded order"), "moving a request offers the recorded order back");
+  check((await json(`/scripts/${sid}`)).order.slice(0, 2).join() === "1,0", "the server stored the new order");
+  check(text(main).includes("Validation: Fail"), "running /page/submit before the form that issues its CSRF token fails validation");
+  click(byText(main, "button", "Back to the recorded order"));
+  await waitFor(() => !byText(main, "button", "Back to the recorded order") && text(main).includes("Validation: Pass"),
+    "the recorded order is back and validation passes again");
 
   go(`#/scripts/${sid}/correlation`);
   await waitFor(() => text(main).includes("found automatically"), "the Correlation tab lists rules");
@@ -230,6 +240,14 @@ process.on("unhandledRejection", (e) => { failures.push(`unhandled: ${e && e.sta
   const saved = (await json(`/scripts/${sid}`)).design.settings.think_time;
   check(saved.mode === "fixed" && saved.seconds === 2, "the server stored fixed 2 s think time");
 
+  go(`#/scripts/${sid}/validation`);
+  await waitFor(() => text(main).includes("Every request matches the recording"), "the Validation tab compares the plan with the recording");
+  check(text(main).includes("10 requests: 10 pass"), "every request passes the comparison");
+  click(within(main, e => e.tag === "button" && text(e).startsWith("#3 GET /private"))[0]);
+  await waitFor(() => text(main).includes("Generated script") && text(main).includes("Bearer ${token}"),
+    "a request opens side by side with the recording");
+  check(text(main).includes("Authorization is sent as ${token}"), "the correlated header is listed as a variable");
+
   go(`#/scripts/${sid}/debug`);
   await waitFor(() => text(main).includes("No replays yet"), "the Debug tab opens");
   click(byText(main, "button", "Run debug replay"));
@@ -240,6 +258,14 @@ process.on("unhandledRejection", (e) => { failures.push(`unhandled: ${e && e.sta
   await waitFor(() => text(main).includes("Response: 200"), "a request's details open");
   check(text(main).includes("csrf=") && text(main).includes("item=Paris"), "the details show the request sent, with the parameter value");
   check(text(main).includes("Passed: Check: text"), "the check result is shown");
+  check(text(main).includes("Checked against the recording before the replay") && text(main).includes("Pass"),
+    "the replay shows the validation that ran before it");
+  const searchForm = within(main, e => e.tag === "form" && e.attrs.role === "search")[0];
+  named(searchForm, "q")[0].value = "Order form";
+  fire(searchForm, "submit");
+  await waitFor(() => text(main).includes('1 result contain "Order form": #0.'), "searching the bodies finds the form page");
+  click(byText(main, "button", "Clear"));
+  await waitFor(() => !text(main).includes('contain "Order form"'), "clearing the search shows every request again");
 
   // ---- correlate automatically: this HAR already has every rule, so one replay confirms it ----
   const autoButton = () => within(main, e => e.tag === "button" && text(e) === "Correlate automatically")[0];

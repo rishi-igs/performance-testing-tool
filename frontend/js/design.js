@@ -248,7 +248,8 @@ async function uploadDataFile(form) {
   if (!/\.(csv|txt)$/i.test(name)) name += ".csv";
   setSaveState("Uploading…");
   try {
-    state.scriptView = await api(`/scripts/${state.script}/files?name=${encodeURIComponent(name.toLowerCase())}&header=${form.elements.header.checked}`,
+    const delimiter = encodeURIComponent(form.elements.delimiter.value);
+    state.scriptView = await api(`/scripts/${state.script}/files?name=${encodeURIComponent(name.toLowerCase())}&header=${form.elements.header.checked}&delimiter=${delimiter}`,
       { method: "POST", body: file, headers: { "Content-Type": "text/csv" } });
     renderScriptPage();
     setSaveState("Uploaded");
@@ -259,14 +260,16 @@ function dataFilesSection() {
   const s = state.scriptView, files = s.design.data_files;
   const update = (n, patch) => saveDesign({ data_files: files.map((f, i) => (i === n ? { ...f, ...patch } : f)) });
   const atEnd = (f) => (f.stop_at_end ? "stop" : f.recycle ? "recycle" : "eof");
+  const DELIMITERS = { ",": "comma", ";": "semicolon", "\t": "tab", "|": "pipe" };
   return h("div", { class: "section" }, h("h2", {}, "Data files"),
     h("p", { class: "intro" }, "A CSV file of test data, such as user names and passwords. Each column becomes a variable; each iteration reads the next row."),
     files.length ? h("div", { class: "tablewrap" }, h("table", { class: "grid" },
       h("thead", {}, h("tr", {}, ["File", "Variables", "Rows", "Rows are", "At the end of the file", ""].map(t => h("th", { scope: "col" }, t)))),
       h("tbody", {}, files.map((f, n) => h("tr", {},
-        h("td", { class: "mono" }, f.name),
+        h("td", { class: "mono" }, f.name, h("small", { class: "src" }, `${DELIMITERS[f.delimiter || ","]}-separated`)),
         h("td", { class: "mono" }, f.columns.map(varRef).join(", ")),
-        h("td", { class: "num" }, fmt(f.rows)),
+        h("td", { class: "num" }, fmt(f.rows), !f.recycle && f.sharing !== "user"
+          ? h("small", { class: "src" }, `enough for ${fmt(f.rows)} iterations in all`) : null),
         h("td", {}, choice("sharing", [["all", "Shared: each row used once"], ["group", "Read from the top per thread group"],
           ["user", "Read from the top by each user"]], f.sharing, { "aria-label": `How users share ${f.name}`,
           onchange: (e) => update(n, { sharing: e.target.value }) })),
@@ -278,8 +281,35 @@ function dataFilesSection() {
       : null,
     h("form", { class: "inline", onsubmit: (e) => { e.preventDefault(); uploadDataFile(e.target); } },
       field("CSV file", h("input", { type: "file", name: "file", accept: ".csv,.txt,text/csv", required: true })),
+      field("Separated by", choice("delimiter", [[",", "Commas"], [";", "Semicolons"], ["tab", "Tabs"], ["|", "Pipes (|)"]], ",")),
       h("label", { class: "check" }, h("input", { type: "checkbox", name: "header", checked: true }), "First line holds the column names"),
       h("button", { class: "btn quiet", type: "submit" }, "Upload")));
+}
+
+// Which requests send each variable, and where (requirements 8.4: a preview of every use).
+function whereUsedSection() {
+  const where = state.scriptView.validation.where || {};
+  const names = Object.keys(where).sort();
+  if (!names.length) return null;
+  const use = (u) => (u.index < 0 ? u.where.join(", ") : `${itemLabel(u.index)} (${u.where.join(", ")})`);
+  return h("div", { class: "section" }, h("h2", {}, "Where each variable is sent"),
+    h("div", { class: "tablewrap" }, h("table", { class: "grid" },
+      h("thead", {}, h("tr", {}, ["Variable", "Sent by", "Comes from"].map(t => h("th", { scope: "col" }, t)))),
+      h("tbody", {}, names.map(name => h("tr", {},
+        h("td", { class: "mono" }, varRef(name)),
+        h("td", {}, h("ul", { class: "issues" }, where[name].map(u => h("li", {}, use(u))))),
+        h("td", {}, variableSource(name))))))));
+}
+
+function variableSource(name) {
+  const d = state.scriptView.design;
+  const c = d.correlations.find(x => x.variable === name);
+  if (c) return `correlation: captured from ${itemLabel(c.source)}`;
+  if (d.parameters.some(p => p.name === name)) return "parameter";
+  const f = d.data_files.find(x => x.columns.includes(name));
+  if (f) return `data file ${f.name}`;
+  if (state.scriptView.variables.includes(name)) return "recorded credential (User Defined Variables)";
+  return (state.scriptView.validation.unresolved || {})[name] ? "nothing: it has no value" : "the plan";
 }
 
 function replacementsSection() {
@@ -344,6 +374,7 @@ function parametersTab() {
       editing ? parameterEditor(editing) : h("button", { class: "btn quiet", onclick: () => startEditing("parameter") }, "Add a parameter")),
     replacementsSection(),
     suggestionsSection(),
+    whereUsedSection(),
     problemsPanel(),
   ];
 }
@@ -359,12 +390,22 @@ function checkSummary(c) {
   }
 }
 
+// A check is on every request, every request of a business function ("tx:<name>"), or one request.
+const checkTarget = (c) => (c.transaction ? `tx:${c.transaction}` : c.item ?? "");
+function checkTargetOptions() {
+  const names = [...new Set(state.scriptView.transactions.map(t => t.name))];
+  return [["", "Every request"], ...names.map(n => [`tx:${n}`, `Business function: ${n}`]),
+    ...keptRequests().map(i => [i.index, itemLabel(i.index)])];
+}
+const checkOn = (c) => (c.transaction ? `Business function ${c.transaction}` : c.item == null ? "Every request" : itemLabel(c.item));
+
 function checkEditor(editing) {
   const checks = state.scriptView.design.checks;
   const c = { item: "", type: "text", value: "", path: "$.", expected: "", limit: 1000, ...editing.draft };
   const read = (form) => {
-    const el = form.elements, type = el.type.value;
-    return { item: el.target.value === "" ? null : +el.target.value, type,
+    const el = form.elements, type = el.type.value, target = el.target.value;
+    return { item: target === "" || target.startsWith("tx:") ? null : +target,
+      transaction: target.startsWith("tx:") ? target.slice(3) : null, type,
       value: el.value ? el.value.value : null, path: el.path ? el.path.value : null,
       expected: el.expected ? (el.expected.value === "" ? null : el.expected.value) : null,
       limit: el.limit ? intOr(el.limit.value, null) : null };
@@ -378,7 +419,7 @@ function checkEditor(editing) {
   return h("form", { class: "editor", onsubmit: (e) => { e.preventDefault(); saveDesign({ checks: [...checks, read(e.target)] }); } },
     h("h3", {}, "Add a check"),
     h("div", { class: "row" },
-      field("On", choice("target", requestOptions(true), c.item ?? "", { "data-key": "k-first" })),
+      field("On", choice("target", checkTargetOptions(), checkTarget(c), { "data-key": "k-first" })),
       field("Check", choice("type", CHECK_TYPES, c.type, { "data-key": "k-type", onchange: (e) => {
         state.editing.draft = { ...read(e.target.form), type: e.target.value }; renderScriptPage("k-type"); } }))),
     typed,
@@ -393,14 +434,18 @@ function checksTab() {
   const kept = new Set(keptRequests().map(i => i.index));
   const sameAs = (a, b) => a.item === b.item && a.type === b.type && a.value == b.value && a.path == b.path;
   const suggestions = (s.suggestions.checks || []).filter(x => kept.has(x.item) && !checks.some(c => sameAs(c, { value: null, path: null, ...x })));
+  const plural = (n, word) => `${n} kept request${n === 1 ? "" : "s"} ${word}`;
   return [
-    h("p", { class: "intro" }, "A request only fails on its status code unless you say what a correct response looks like: a 200 can still be an error page or a login screen."),
+    h("p", { class: "intro" }, "A request only fails on its status code unless you say what a correct response looks like: a 200 can still be an error page or a login screen. Checks can cover every request, every request of a business function, or one request; failed checks are counted apart from status code errors."),
+    (v.unchecked || []).length ? h("div", { class: "warn critical" },
+      `${plural(v.unchecked.length, "have no check at all")}, not even on the status code: any response counts as a success. `,
+      v.unchecked.slice(0, 5).map(itemLabel).join(", "), v.unchecked.length > 5 ? "…" : "") : null,
     (v.status_only_checks || []).length ? h("div", { class: "warn" },
-      `${v.status_only_checks.length} kept request${v.status_only_checks.length === 1 ? "" : "s"} only check the status code.`) : null,
+      `${plural(v.status_only_checks.length, "only check the status code")}.`) : null,
     checks.length ? h("div", { class: "tablewrap" }, h("table", { class: "grid" },
       h("thead", {}, h("tr", {}, ["On", "Check", "Expect", ""].map(t => h("th", { scope: "col" }, t)))),
       h("tbody", {}, checks.map((c, n) => h("tr", {},
-        h("td", {}, c.item == null ? "Every request" : itemLabel(c.item)),
+        h("td", {}, checkOn(c)),
         h("td", {}, CHECK_TYPES.find(([k]) => k === c.type)[1]),
         h("td", { class: "mono" }, checkSummary(c)),
         h("td", { class: "rowactions" }, h("button", { class: "btn quiet small", "aria-label": `Delete check ${n + 1}`,

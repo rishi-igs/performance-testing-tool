@@ -15,12 +15,13 @@ from ..db import DEFAULT_PROJECT, Database, now_iso
 from ..deps import audit, ensure_project, project_filter, target_project, tester, visible_projects
 from ..deps import viewer as require_api_key
 from ..models.scenario import ScenarioConfig
-from ..services import analysis, result_analyzer, scenario_analyzer
+from ..services import analysis, har_validator, result_analyzer, scenario_analyzer, script_builder
 from ..services.monitoring import MonitorSampler, monitor_errors, monitor_series, monitor_warnings
 from ..services.scenario_builder import ScenarioError, build_scenario, planned_users
 from ..services.test_executor import Outcome, TooManyTests, finish_status, run_paths
 from .debug import check_hosts
 from .infra import check_generator
+from .scripts import evaluate
 
 router = APIRouter(prefix="/scenarios", tags=["scenarios"])
 
@@ -70,6 +71,33 @@ def plan_for(db: Database, cfg: ScenarioConfig, *, engines: int = 1):
         return build_scenario(cfg, scripts, {sid: db.script_files(sid) for sid in scripts}, engines=engines)
     except ScenarioError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+def validate_scripts(db: Database, cfg: ScenarioConfig) -> tuple[list[str], dict[str, dict[str, Any]]]:
+    """Run the HAR comparison validator on every script the scenario uses (requirements 8.5).
+
+    A script that fails would make the whole run go wrong (it sends ${variables} nothing sets, or
+    uses a value before capturing it), so the run does not start. Warnings are passed on.
+    """
+    warnings: list[str] = []
+    briefs: dict[str, dict[str, Any]] = {}
+    for script_id in dict.fromkeys(g.script_id for g in cfg.active_groups()):
+        script = db.get_script(script_id)
+        if not script:
+            continue
+        _, view = evaluate(script)
+        if not view["transactions"]:
+            continue
+        tree, built = script_builder.build_tree(script, view, data=db.script_files(script_id))
+        report = har_validator.validate(script, view, tree, built)
+        briefs[script_id] = har_validator.brief(report)
+        if report["status"] == "fail":
+            raise HTTPException(422, f"Script {script['name']} fails validation, so the run would go wrong: "
+                                     + "; ".join(har_validator.problems(report)) + ". See the script's Validation tab.")
+        if report["status"] == "warn":
+            warnings.append(f"Script {script['name']}: validation passed with warnings on "
+                            f"{report['counts']['warn']} request(s); see its Validation tab.")
+    return warnings, briefs
 
 
 def _detail(db: Database, scenario: dict[str, Any]) -> dict[str, Any]:
@@ -124,9 +152,14 @@ def delete_scenario(scenario_id: str, request: Request, who: str = Depends(teste
 def preview(scenario_id: str, request: Request, _: str = Depends(require_api_key)):
     """Planned running users over time per group, and what the plan will contain."""
     cfg = ScenarioConfig(**get_scenario_or_404(request, scenario_id)["config"])
-    plan = plan_for(request.app.state.db, cfg)
-    return {**planned_users(cfg), "groups_plan": plan.groups, "warnings": plan.warnings, "hosts": plan.hosts,
-            "total_users": plan.total_users}
+    db = request.app.state.db
+    plan = plan_for(db, cfg)          # first: it reports a schedule that cannot be built
+    try:
+        validation_warnings, validation = validate_scripts(db, cfg)
+    except HTTPException as exc:
+        validation_warnings, validation = [str(exc.detail)], {}
+    return {**planned_users(cfg), "groups_plan": plan.groups, "warnings": plan.warnings + validation_warnings,
+            "hosts": plan.hosts, "total_users": plan.total_users, "validation": validation}
 
 
 @router.get("/{scenario_id}/export-jmx")
@@ -216,6 +249,8 @@ def start_scenario_run(state: Any, scenario: dict[str, Any], who: str) -> dict[s
     monitors = _resources(db, "monitors", cfg.monitors)
     plan = plan_for(db, cfg, engines=max(1, len(generators)))
     check_hosts(settings, plan.hosts, who)
+    validation_warnings, _ = validate_scripts(db, cfg)
+    plan.warnings += validation_warnings
 
     properties = list(plan.properties)
     if generators:

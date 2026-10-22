@@ -23,6 +23,11 @@ Dynamic values that a replay must correlate (each is issued fresh and checked):
   POST /xsrf/submit         needs the X-XSRF-TOKEN header to equal that cookie
   POST /reset               forgets every issued value (tests use it between recording and replay)
   GET  /prom-metrics        Prometheus text shaped like node_exporter (for monitor tests)
+
+For recording in a real browser (the Phase 3 acceptance check):
+  GET  /demo                a small shop page: sign in, then place an order. Its script calls the
+                            endpoints above, so the recording holds a login token, a CSRF token,
+                            a new order id and an XSRF cookie, as a real application would.
 """
 from __future__ import annotations
 
@@ -158,6 +163,66 @@ def xsrf_submit(request: Request):
     if not header or header != request.cookies.get("XSRF-TOKEN") or header not in _xsrf:
         raise HTTPException(403, "xsrf check failed")
     return {"ok": True}
+
+
+_DEMO = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Demo shop</title><meta name="csrf-token" content="{csrf}">
+<style>
+  body {{ font: 16px/1.5 system-ui, sans-serif; margin: 0; background: #f4f6f8; color: #16222e; }}
+  main {{ max-width: 420px; margin: 8vh auto; background: #fff; border: 1px solid #d3dae1; border-radius: 10px; padding: 24px; }}
+  label {{ display: grid; gap: 4px; margin: 0 0 12px; font-size: 14px; }}
+  input, select {{ font: inherit; padding: 8px; border: 1px solid #c4ccd4; border-radius: 6px; }}
+  button {{ font: inherit; font-weight: 600; padding: 9px 14px; border: 0; border-radius: 6px; background: #0f6e8c; color: #fff; cursor: pointer; }}
+  [hidden] {{ display: none; }} #log {{ font-size: 14px; color: #5a6b7b; }}
+</style></head>
+<body><main>
+  <h1>Demo shop</h1>
+  <form id="signin"><label>User name <input name="username" value="demo.user" autocomplete="username"></label>
+    <label>Password (any) <input name="password" type="password" required autocomplete="current-password"></label>
+    <button>Sign in</button></form>
+  <form id="order" hidden><label>Item <select name="item"><option>book</option><option>lamp</option></select></label>
+    <button>Place order</button></form>
+  <p id="log" role="status"></p>
+</main>
+<script>
+  const log = (t) => {{ document.getElementById("log").textContent = t; }};
+  let token = null;
+  document.getElementById("signin").addEventListener("submit", async (e) => {{
+    e.preventDefault();
+    const f = e.target.elements;
+    const r = await fetch("/login", {{ method: "POST", headers: {{ "Content-Type": "application/json" }},
+      body: JSON.stringify({{ username: f.username.value, password: f.password.value }}) }});
+    token = (await r.json()).token;
+    const me = await fetch("/private", {{ headers: {{ Authorization: "Bearer " + token }} }});
+    if (!me.ok) {{ log("Sign-in failed"); return; }}
+    await fetch("/xsrf");
+    document.getElementById("signin").hidden = true;
+    document.getElementById("order").hidden = false;
+    log("Signed in as " + f.username.value);
+  }});
+  document.getElementById("order").addEventListener("submit", async (e) => {{
+    e.preventDefault();
+    const item = e.target.elements.item.value;
+    const created = await (await fetch("/api/orders/new", {{ headers: {{ Authorization: "Bearer " + token }} }})).json();
+    await fetch("/api/orders/" + created.order.id, {{ headers: {{ Authorization: "Bearer " + token }} }});
+    const csrf = document.querySelector("meta[name=csrf-token]").content;
+    await fetch("/page/submit", {{ method: "POST", headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
+      body: "csrf=" + encodeURIComponent(csrf) + "&item=" + encodeURIComponent(item) }});
+    const xsrf = (document.cookie.match(/XSRF-TOKEN=([^;]+)/) || [])[1] || "";
+    const done = await fetch("/xsrf/submit", {{ method: "POST", headers: {{ "Content-Type": "application/json", "X-XSRF-TOKEN": xsrf }},
+      body: JSON.stringify({{ order: created.order.id }}) }});
+    log(done.ok ? "Order " + created.order.id + " placed" : "The order failed");
+  }});
+</script></body></html>"""
+
+
+@app.get("/demo", response_class=HTMLResponse)
+def demo():
+    """The page to record in a browser: sign in, then place an order (see the module docstring)."""
+    token = _token()
+    _csrf.add(token)
+    return _DEMO.format(csrf=token)
 
 
 @app.post("/reset")

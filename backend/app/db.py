@@ -146,6 +146,7 @@ MIGRATIONS = [
     ("scripts", "project_id", "TEXT NOT NULL DEFAULT 'p_default'"),
     ("scenarios", "project_id", "TEXT NOT NULL DEFAULT 'p_default'"),
     ("scenarios", "baseline_run_id", "TEXT"),
+    ("scripts", "order_json", "TEXT NOT NULL DEFAULT '[]'"),
 ]
 DEFAULT_PROJECT = "p_default"
 
@@ -358,7 +359,7 @@ class Database:
         if not row:
             return None
         d = dict(row)
-        for key in ("items", "variables", "warnings", "rules", "overrides", "design", "suggestions"):
+        for key in ("items", "variables", "warnings", "rules", "overrides", "design", "suggestions", "order"):
             d[key] = json.loads(d.pop(f"{key}_json"))
         return d
 
@@ -658,18 +659,20 @@ class Database:
 
     def update_script(
         self, script_id: str,
-        mutate: Callable[[dict[str, Any], dict[str, Any]], tuple[dict[str, Any], dict[str, Any]]],
+        mutate: Callable[[dict[str, Any], dict[str, Any], list[int]], tuple[dict[str, Any], dict[str, Any], list[int]]],
     ) -> bool:
-        """Read rules and edits, apply `mutate`, write them back, all in one transaction."""
+        """Read rules, edits and request order, apply `mutate`, write them back, all in one transaction."""
         with self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
-            row = c.execute("SELECT rules_json, overrides_json FROM scripts WHERE id = ?", (script_id,)).fetchone()
+            row = c.execute("SELECT rules_json, overrides_json, order_json FROM scripts WHERE id = ?",
+                            (script_id,)).fetchone()
             if not row:
                 return False
-            rules, overrides = mutate(json.loads(row["rules_json"]), json.loads(row["overrides_json"]))
+            rules, overrides, order = mutate(json.loads(row["rules_json"]), json.loads(row["overrides_json"]),
+                                             json.loads(row["order_json"]))
             c.execute(
-                "UPDATE scripts SET rules_json = ?, overrides_json = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(rules), json.dumps(overrides), now_iso(), script_id),
+                "UPDATE scripts SET rules_json = ?, overrides_json = ?, order_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(rules), json.dumps(overrides), json.dumps(order), now_iso(), script_id),
             )
         return True
 

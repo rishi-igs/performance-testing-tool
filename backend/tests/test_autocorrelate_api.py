@@ -105,7 +105,8 @@ def test_a_recorded_login_and_generated_ids_are_parameterized_at_import(client, 
     script = client.post("/scripts/import-har", content=record_login(target_url), params={"name": "Login"}).json()
     design = script["design"]
     assert design["data_files"] == [{"name": "users.csv", "columns": ["username", "password"], "sharing": "all",
-                                     "recycle": True, "stop_at_end": False, "first_line_header": True, "rows": 1}]
+                                     "recycle": True, "stop_at_end": False, "first_line_header": True, "delimiter": ",",
+                                     "rows": 1}]
     assert {"find": "alice.w", "variable": "username"} in design["replacements"]
     assert {"find": "S3cret-pass-1", "variable": "password"} in design["replacements"]
     assert [(p["name"], p["type"]) for p in design["parameters"]] == [("requestId", "uuid")]

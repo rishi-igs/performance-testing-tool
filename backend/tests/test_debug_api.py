@@ -89,7 +89,7 @@ def test_data_files_settings_and_zip_export(client, target_url):
     assert r.status_code == 200, r.text
     files = r.json()["design"]["data_files"]
     assert files == [{"name": "users.csv", "columns": ["user_name", "password"], "sharing": "all", "recycle": True,
-                      "stop_at_end": False, "first_line_header": True, "rows": 2}]
+                      "stop_at_end": False, "first_line_header": True, "delimiter": ",", "rows": 2}]
     files[0]["sharing"] = "user"
     settings = {"think_time": {"mode": "fixed", "seconds": 1.5}, "pacing": {"mode": "interval", "seconds": 20}}
     r = client.put(f"/scripts/{sid}/design", json={"data_files": files, "settings": settings,
