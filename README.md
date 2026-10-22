@@ -8,15 +8,19 @@ results into p50/p95/p99, throughput and error rate, and explains problems in pl
 
 | LoadRunner | Here |
 |---|---|
-| VuGen | import a HAR or `.jmx`, group requests into business functions, automatic and manual correlation, parameters (CSV, unique, random, dates), text checks, think time and pacing, debug replay against the recording |
-| Controller | scenarios: groups of users running scripts, ramp-up and ramp-down, rendezvous points, goal-oriented throughput, SLAs per business function |
+| VuGen | import a HAR or `.jmx`, filter, reorder and group requests into business functions, automatic and manual correlation, parameters (CSV, unique, random, dates), checks, think time and pacing, a HAR comparison validator, debug replay against the recording |
+| Controller | scenarios: groups of users running scripts, ramp-up and ramp-down or a traffic profile, rendezvous points, goal-oriented throughput, SLAs per business function, stopping at the breaking point |
 | Load generators | distributed runs on `jmeter-server` machines |
 | Monitors | server CPU and memory during runs (an agent, Prometheus exporters, or this machine) |
-| Analysis | results per business function, graph overlays, run comparison, SLA report, HTML/PDF/Word export |
+| Analysis | an overview of running and recent runs, results per business function, graph overlays, run comparison, SLA report, HTML/PDF/Word export |
 | Enterprise | user accounts and roles, projects, scheduled runs, trends with a baseline |
 
-Quick tests (one URL, step-load profiles) and the CLI gate remain. See "Known limitations" for
-what is not covered or not verified.
+Quick tests (one URL, a test type and a traffic profile) and the CLI gate remain. See "Known
+limitations" for what is not covered or not verified.
+
+**Roadmap.** Phases 1 to 4 of [requirements.md](requirements.md) are done: the basic load generator,
+traffic profiles, HAR import with script preparation and debugging, and the dashboard. Phase 3's
+exit check in a real browser is a manual step (see "Acceptance check in a real browser").
 
 ## Quick start
 
@@ -36,7 +40,9 @@ python -m uvicorn app.main:app --port 8000
 ```
 
 Open <http://127.0.0.1:8000>, enter `http://127.0.0.1:9000/slow?ms=120`, and start a test.
-(`scripts/dev.sh` starts both for you on macOS/Linux.)
+Or start both with one command from the project folder: `npm run dev` (Node 18+, nothing to install).
+It uses `backend/.venv` when there is one and sets `ALLOW_PRIVATE_TARGETS=true`; JMeter must be on
+PATH or in `JMETER_BIN`. `npm start` starts the tool only. (`scripts/dev.sh` does the same on macOS/Linux.)
 
 **First thing to do on your machine:** run one 10-second test and open the "JMeter HTML report"
 and "Test plan (.jmx)" downloads. Plans are checked in automated tests against a JMeter stand-in
@@ -77,7 +83,13 @@ can open in JMeter. It accepts:
 static files by extension and content type, analytics/ads/chat-widget domains, `OPTIONS`
 preflights, browser-internal and cancelled requests, and samplers disabled in an imported
 `.jmx`. *Keep API calls only* also drops page navigations (HAR only; a JMX has no response types).
-Excluded requests stay in the list with the reason and can be kept again.
+*Leave out repeated polling* (off by default) keeps only the first of the GET requests to one URL
+that the recording made three or more times (polling, heartbeats). Excluded requests stay in the
+list with the reason and can be kept again. The table filters by method, domain, type and status code.
+
+**Order.** Requests run in the recorded order. Move one up or down (the arrows in the table) to
+change it; *Back to the recorded order* undoes all moves. The validator flags a move that puts a
+request before the one its values come from.
 
 **Business functions.** Each kept request gets a name, in this order of priority:
 
@@ -118,8 +130,8 @@ is stored as uploaded so it can be rebuilt. Delete an import from its page when 
 | POST | `/scripts/import-har?name=` | upload a HAR as the raw request body |
 | POST | `/scripts/import-jmx?name=` | upload a `.jmx` as the raw request body |
 | GET | `/scripts` | list imports |
-| GET | `/scripts/{id}` | requests with keep/exclude reasons, business functions, rules |
-| PUT | `/scripts/{id}/filter` | `{"changes": [{"index": 3, "include": false, "transaction": "Login"}], "rules": {...}}`; `null` returns a field to automatic |
+| GET | `/scripts/{id}` | requests with keep/exclude reasons, business functions, rules, run order, validation summary |
+| PUT | `/scripts/{id}/filter` | `{"changes": [{"index": 3, "include": false, "transaction": "Login"}], "rules": {...}, "order": [...]}`; `null` returns a field to automatic; `"order": []` returns to the recorded order |
 | GET | `/scripts/{id}/export-jmx?users=1&loops=1&ramp_up_seconds=0` | download the grouped `.jmx` (load options apply to HAR imports) |
 | DELETE | `/scripts/{id}` | delete an import |
 
@@ -136,13 +148,39 @@ JMeter elements, so the exported plan opens and runs in the JMeter GUI.
 | Tab | What it does | JMeter elements it adds |
 |---|---|---|
 | Correlation | Captures values the server issues (login tokens, CSRF tokens, new IDs, redirect codes, cookies copied into headers) and sends them back. **HAR imports are correlated automatically**: a dynamic-looking value a request sends that an earlier response contained gets an extractor and becomes `${variable}` everywhere it is sent. Add or edit rules by hand. | JSON Extractor (`$.token`), Boundary Extractor (left/right text, like `web_reg_save_param`), Regular Expression Extractor (body or headers) |
-| Parameters | Test data per user: CSV data files (each column a variable; shared, per thread group or per user; recycle, stop or continue at the end), lists (sequential or random), random numbers, unique numbers, UUIDs, dates (Java format, offset in days, or Unix time) and random text. "Replace recorded text" turns a recorded value into `${variable}` everywhere. | CSV Data Set Config, Counter, Random Variable, or a function at each use (`__UUID`, `__timeShift`, `__RandomString`, `__Random`) |
-| Checks | What a correct response looks like, on one request or all: text present or absent, regex, JSON field exists or equals, header text, response time, body size. Suggestions come from the recording (page titles, `success`/`status` fields). | Response Assertion, JSON Assertion, Duration Assertion, Size Assertion |
+| Parameters | Test data per user: CSV data files (comma, semicolon, tab or pipe separated; each column a variable; shared, per thread group or per user; recycle, stop or continue at the end), lists (sequential or random), random numbers, unique numbers, UUIDs, dates (Java format, offset in days, or Unix time) and random text. "Replace recorded text" turns a recorded value into `${variable}` everywhere. *Where each variable is sent* lists the requests and the place (URL, body, form field, header) of every use. A file that does not start again at the top and has fewer rows than users gets a warning (export, debug replay, scenario). | CSV Data Set Config, Counter, Random Variable, or a function at each use (`__UUID`, `__timeShift`, `__RandomString`, `__Random`) |
+| Checks | What a correct response looks like, on every request, every request of a business function, or one request: text present or absent, regex, JSON field exists or equals, header text, response time, body size. Suggestions come from the recording (page titles, `success`/`status` fields). Requests with no check at all, or only the status code check, are listed. Failed checks are counted apart from status code errors in every result. | Response Assertion, JSON Assertion, Duration Assertion, Size Assertion |
 | Run-time settings | Think time between business functions (as recorded × factor with a cap, none, fixed, random), pacing (start every N s, or wait fixed/random after each iteration), what to do on an error, a new visitor each iteration, timeout, recorded status checks. | Flow Control Action + Constant/Uniform Random Timer (outside Transaction Controllers, so not counted as response time), Constant Throughput Timer (pacing), Thread Group error action |
-| Debug replay | Runs the script once with one user (no think time or pacing) and compares every request with the recording: status codes, unresolved `${variables}`, extractors that found nothing, failed checks, connection errors. The first failure is highlighted with its likely cause and fix, and each request's full request and response can be opened (credentials masked unless you choose to show them). The last 10 replays are kept. | Debug Sampler after each request that feeds a correlation |
+| Validation | The HAR comparison validator (below): the generated script against the recording, request by request, side by side. | (none: it reads the plan) |
+| Debug replay | Runs the script once with one user, or with up to 5 users and 5 iterations (no think time or pacing), and compares every request with the recording: status codes, unresolved `${variables}`, extractors that found nothing, failed checks, connection errors. The first failure is highlighted with its likely cause and fix, and a link opens the editor that fixes it. Each request's full request and response can be opened, with the variables it sent; passwords, tokens, cookies and credential headers are masked unless a tester chooses to show them. Search finds text in URLs, headers and bodies. Compare one replay with another to see what a fix changed. The JMeter log and the raw results file are one click away. The last 10 replays are kept. | Debug Sampler after each request that feeds a correlation |
 
 The page also lists every variable that is used but never set, with one click to correlate it or
 make it a parameter. A script with data files downloads as a `.zip` (plan plus `data/*.csv`).
+
+### HAR comparison validator
+
+The cross-check against the browser's DevTools (F12), done for you. Each kept request is compared
+with the request the plan will send:
+
+| Check | What it looks at |
+|---|---|
+| Endpoint | method, host, path and query parameters |
+| Headers | headers that matter are still sent (browser-managed ones such as `User-Agent` are ignored); cookies the recording sent were set by an earlier kept response, so the Cookie Manager can send them |
+| Body | the same JSON or form fields, with dynamic fields replaced by variables |
+| Tokens | every dynamic-looking value is correlated, parameterized, or marked static |
+| Order | the requests run in the recorded order, and each correlation's source runs before its uses |
+
+Each difference is *missing*, *extra*, *changed*, *unresolved* or *variable* (a recorded value now
+sent as `${variable}`, which is what correlation and parameterization should do). The result is
+**Pass**, **Pass with warnings** or **Fail**. Fail means the replay is sure to go wrong: a variable
+nothing sets, a value used before it is captured, a different endpoint. The Validation tab shows
+each request side by side with the recording, lists the unresolved values with *Correlate*, *Make
+it a parameter* and *Mark static*, and masks credentials unless a tester shows them.
+
+It runs by itself before every debug replay (the result is kept with the replay) and before every
+scenario run: a script that fails cannot start a scenario, and warnings are added to the run.
+Values correlated during a HAR import appear on the recording's side as their masked recorded
+value (`[recorded ab12… (24 characters)]`): the recording itself is not stored.
 
 ### What is automatic
 
@@ -178,13 +216,16 @@ hand if the server issues them.
 |---|---|---|
 | POST | `/scripts/{id}/autocorrelate` | start "Correlate automatically" (testers; 409 while one runs) |
 | GET | `/scripts/{id}/autocorrelate` | its progress, or the last result (`idle` if never run) |
-| PUT | `/scripts/{id}/design` | replace `correlations`, `parameters`, `data_files`, `replacements`, `checks` or `settings` (parts left out are kept) |
-| POST | `/scripts/{id}/files?name=users.csv&header=true` | upload a CSV data file (raw body, up to 10 MB) |
+| PUT | `/scripts/{id}/design` | replace `correlations`, `parameters`, `data_files`, `replacements`, `checks`, `settings` or `static_values` (parts left out are kept) |
+| POST | `/scripts/{id}/files?name=users.csv&header=true&delimiter=,` | upload a CSV data file (raw body, up to 10 MB; delimiter `,` `;` `\|` or `tab`) |
 | DELETE | `/scripts/{id}/files/{name}` | remove a data file |
-| POST | `/scripts/{id}/debug-run` | start a debug replay |
+| GET or POST | `/scripts/{id}/validation`, `/scripts/{id}/validate` (`?reveal=true` for testers) | the HAR comparison validator's report |
+| POST | `/scripts/{id}/debug-run?users=1&iterations=1` | start a debug replay (at most 5 users and 5 iterations) |
 | GET | `/scripts/{id}/debug-runs` | the last replays |
-| GET | `/debug-runs/{run_id}` | per-request comparison, diagnosis, captured values |
-| GET | `/debug-runs/{run_id}/samples/{n}?reveal=false` | full request and response of request #n |
+| GET | `/debug-runs/{run_id}` | per-request comparison, diagnosis, captured values, the validation before it |
+| GET | `/debug-runs/{run_id}/samples/{n}?occurrence=0&reveal=false` | full request and response of request #n (its first result, or another one) |
+| GET | `/debug-runs/{run_id}/search?q=` | the requests whose URL, headers or bodies contain the text |
+| GET | `/debug-runs/{run_id}/jmeter.log`, `/debug-runs/{run_id}/results.xml` | the JMeter log; the raw results (testers; unmasked) |
 
 All hosts a script calls pass the same checks as a quick test (`ALLOW_PRIVATE_TARGETS`,
 `ALLOWED_HOSTS`) before a replay starts.
@@ -196,7 +237,13 @@ A scenario decides who runs what, like a LoadRunner Controller scenario:
 - **Groups**: each runs one script with its own users (or a share of a total, percentage mode),
   its own schedule or the scenario's, and optionally no think time.
 - **Schedule**: start delay, ramp-up, steady load, ramp-down, or a number of iterations per user.
-  Ramp-down uses up to 10 staggered thread groups, so no JMeter plugins are needed.
+  Ramp-down uses up to 10 staggered thread groups, so no JMeter plugins are needed. Or **steps over
+  time** (a traffic profile, as for quick tests): the steps give the shape, and each group follows
+  it with its highest step at the group's users, so spikes, waves, pauses and several phases work
+  with recorded scripts too.
+- **Stop at the breaking point**: stop the run once the last N seconds have more errors, or a higher
+  95th percentile, than a limit; the result names the load at that moment.
+- **Validation**: every script passes the HAR comparison validator before the run starts.
 - **Rendezvous points**: a share of a group's users waits before a business function, then acts at
   once (Synchronizing Timer, with a timeout).
 - **Goal-oriented**: hold a number of business functions or requests per second with up to N users
@@ -228,7 +275,12 @@ every SLA is met, 1 when one is missed, 2 when the run could not start or failed
 JMeter logs a harmless `Existing CookieManager ... superseded` warning for requests whose
 response sets a cookie, from the second iteration on; it does not affect cookies.
 
-## Analysis, comparison and reports
+## Overview, analysis, comparison and reports
+
+The **Overview** (the start page) shows the project's tests at a glance: what is running now with
+live users, requests, errors and 95th percentile; alerts from the latest runs (critical findings
+and runs that failed); and recent results with their verdicts, for quick tests and scenarios alike.
+It refreshes itself while something runs. `GET /dashboard?project=` returns the same.
 
 Every finished run (quick test or scenario) has an **Analysis** section:
 
@@ -351,23 +403,45 @@ Lists take `?project=<id>`, and so do the calls that create scripts, scenarios a
 
 ## Configuration of a test
 
-An optional `profile` configures an increasing step load. Each step adds users at its
-`time_seconds` offset; added users stay active until the test ends. The final step must
-start before `duration_seconds`, match `users`, and `ramp_up_seconds` must be zero.
-Omit `profile` to retain the fixed-user load behavior.
+Without a profile a test runs `users` users for `duration_seconds`, starting them evenly over
+`ramp_up_seconds`. A **traffic profile** controls the number of users over time instead: each step
+changes to `users` at `time_seconds`, over `ramp_seconds` (0 = at once). Users above a lower step
+stop, the last ones added first; 0 users pauses. Steps start at 0, may not overlap another step's
+ramp, and must end within the test. `users` is the highest step (leave it out, or give the same
+number). Times can be written with units: `time: 2m`, `ramp: 30s`, `duration_seconds: 1h`.
 
 ```yaml
-users: 100                 # peak users; must match the final step
-duration_seconds: 90
-ramp_up_seconds: 0
+test_type: spike           # load, stress, spike, soak, volume, scalability or breakpoint
+duration_seconds: 60
 profile:
-  - time_seconds: 0
-    users: 10
-  - time_seconds: 30
+  - time: 0s               # 5 users from the start
+    users: 5
+  - time: 20s              # a sudden spike to 50
     users: 50
-  - time_seconds: 60
-    users: 100
+  - time: 40s              # and back to 5
+    users: 5
 ```
+
+Every shape is built from standard Thread Groups (start delay, ramp-up, duration), so the plan
+needs no JMeter plugins: a ramp-down becomes up to 10 groups that stop one after another.
+
+| Shape | Profile |
+|---|---|
+| constant load | no profile (or ramp-up only) |
+| ramp-up | `0:100` with `ramp_seconds: 60` |
+| step load | `0:10`, `30:50`, `60:100` |
+| spike | `0:5`, `20:500`, `40:5` |
+| wave | `0:50` ramp 30, `60:5` ramp 30, `120:50` ramp 30, ... |
+| long flat (soak) | `0:50` ramp 300, with `duration_seconds: 24h` (raise `MAX_DURATION_SECONDS`) |
+| increase until failure (breakpoint) | `0:1`, `1:500` ramp 590, with `stop_when` |
+| load reduction | a lower step, with a ramp |
+| pause | a step with 0 users, then a step back up |
+| several phases | any number of steps (up to 100) |
+
+The **test type** says what the run is for (the dashboard fills in a starting profile for each);
+**stop_when** ends the run at its breaking point: once the error rate, or the 95th percentile, of
+the last `for_seconds` is above the limit, JMeter is stopped, and the result names the users that
+were running then. See `config/spike.yaml`, `config/step-load.yaml` and `config/breakpoint.yaml`.
 
 | Field | Default | Notes |
 |---|---|---|
@@ -376,15 +450,20 @@ profile:
 | `method` | `GET` | GET, POST, PUT, PATCH, DELETE, HEAD |
 | `headers` | `{}` | secret headers are masked in all API responses |
 | `body` | none | raw request body |
-| `users` | 10 | virtual users |
+| `test_type` | `load` | `load`, `stress`, `spike`, `soak`, `volume`, `scalability`, `breakpoint` |
+| `users` | 10 | virtual users; with a profile, its highest step |
 | `duration_seconds` | 60 | total run time, including ramp-up |
-| `ramp_up_seconds` | 0 | users start evenly over this period |
-| `profile` | none | optional increasing step-load targets (`time_seconds`, `users`); final target must equal `users` |
+| `ramp_up_seconds` | 0 | users start evenly over this period (0 with a profile) |
+| `profile` | none | steps of `time_seconds`, `users` and `ramp_seconds` (or `time` and `ramp` with units) |
+| `stop_when` | none | `error_rate_percent` and/or `p95_ms`, over the last `for_seconds` (10) |
 | `think_time_ms` | 0 | pause between requests per user |
 | `timeout_ms` | 30000 | connect and response timeout |
 | `expected_status_codes` | `[200]` | anything else counts as a failure |
 | `thresholds.max_error_rate_percent` | 1.0 | exceeding it fails the run |
 | `thresholds.max_p95_ms` | 1000 | `null` disables |
+
+Results count failures by kind: wrong status code, failed check (content, time or size) and
+connection error, so a failed check is not mixed up with an HTTP error.
 
 ## API
 
@@ -395,12 +474,13 @@ profile:
 | GET | `/tests/{id}` | config, state, summary |
 | GET | `/tests/{id}/status` | state plus live metrics |
 | GET | `/tests/{id}/timeline` | per-interval series for charts |
-| POST | `/tests/{id}/stop` | stop a running test (partial results are kept) |
+| POST | `/tests/{id}/stop` | stop a running test (partial results are kept): JMeter gets "StopTestNow" on the run's own control port, as with its stoptest script, and its whole process tree is ended if it is still running 15 s later |
 | GET | `/reports/{id}` | JMeter HTML report |
 | GET | `/reports/{id}/metrics.json` | export metrics |
 | GET | `/reports/{id}/results.csv` | raw JTL results |
 | GET | `/reports/{id}/plan.jmx` | the generated plan (open it in JMeter) |
 | GET | `/reports/{id}/jmeter.log` | JMeter log |
+| GET | `/dashboard` | running tests with live numbers, alerts and recent results (`?project=`) |
 
 Interactive docs: <http://127.0.0.1:8000/docs>.
 
@@ -451,13 +531,31 @@ REAL_JMETER_BIN=/path/to/apache-jmeter-5.6.3/bin/jmeter python -m pytest tests/t
 python -m pytest tests/test_ui_smoke.py
 ```
 
-Config validation, SSRF checks, plan generation (including XML escaping), result math
-and warnings, end-to-end runs (start, live metrics, stop, failure detection, API key,
-limits, restart recovery), HAR/JMX import (filter rules, grouping, secret removal,
-regrouped export, upload limits), correlation, parameters and debug replay, scenarios, analysis
+Config validation, SSRF checks, plan generation (including XML escaping), traffic profiles (the
+thread groups are simulated against the planned users), result math, warnings and the breaking
+point, incremental reading of live results, end-to-end runs (start, live metrics, stop, failure
+detection, API key, limits, restart recovery), HAR/JMX import (filter rules, grouping, ordering,
+secret removal, regrouped export, upload limits), correlation, parameters, the HAR comparison
+validator, debug replay (several users, search, masking, logs), scenarios, the overview, analysis
 and reports, generators and monitors, and accounts, roles, projects, tokens, schedules and trends.
+`tests/test_acceptance.py` runs the Phase 3 exit check on the sample app's sign-in and order flow.
 End-to-end tests use `tests/fake_jmeter.py`, a small stand-in that reads the generated plan and
 sends real HTTP requests to `tests/sample_app.py`, so the pipeline can be tested without JMeter.
+
+## Acceptance check in a real browser
+
+Phase 3 is done when a flow recorded in a real browser, with a sign-in, passes a debug replay with
+every check green and no unresolved dynamic values. The automated tests use a scripted client, so
+record it once by hand:
+
+1. Start the sample app: `cd backend && python -m uvicorn tests.sample_app:app --port 9000`, and the
+   tool with `ALLOW_PRIVATE_TARGETS=true`.
+2. In Chrome or Edge, open DevTools (F12) > Network, tick *Preserve log*, and open
+   <http://127.0.0.1:9000/demo>.
+3. Sign in (any password), choose an item and *Place order*. The page says "Order ... placed".
+4. In the Network tab, right-click > *Save all as HAR*, and import the file under Scripts.
+5. On the Validation tab the result should be **Pass**, with no dynamic values left. Then run a
+   debug replay: every request should pass.
 
 ## Known limitations
 
@@ -469,11 +567,16 @@ sends real HTTP requests to `tests/sample_app.py`, so the pipeline can be tested
 - Without a time-zone database (Windows without `tzdata`), schedules use a fixed UTC offset.
 - Imported scripts keep the recorded request bodies (which can hold test-account passwords),
   `.jmx` imports keep the original file, and debug replays keep full requests and responses in
-  their run folder (the last 10 per script). None of this is encrypted at rest and, apart from
+  their run folder (the last 10 per script). The console masks passwords, tokens, cookies and
+  credential headers when it shows them, but none of this is encrypted at rest and, apart from
   old debug replays, nothing is deleted automatically: protect the data folder and delete scripts
-  you no longer need (runs cannot be deleted from the console yet).
-- Results are re-parsed from the JTL on each status call. Fine for runs of minutes to an hour or
-  so; very long soak runs would need incremental parsing.
+  you no longer need (runs cannot be deleted from the console yet). HAR files are not sanitized
+  beyond that on upload.
+- Live results are read incrementally (only what JMeter added since the last look), but every
+  sample of the four most recent results files is held in memory. Fine for runs of hours at
+  moderate load; a soak test of a day or more at high throughput would need streaming statistics.
+- A traffic profile with many ramp-downs needs many thread groups (each ramp-down splits into up
+  to 10); a profile that would need more than 300 is refused.
 - If the server process is killed hard (not shut down), a running JMeter keeps going until its
   scheduled duration ends. The run is marked failed on the next start.
 - DNS is checked at creation and again by JMeter, so a hostile DNS server could differ between the two.
@@ -483,15 +586,17 @@ sends real HTTP requests to `tests/sample_app.py`, so the pipeline can be tested
 ```
 backend/app/   main.py, config.py, db.py, deps.py, cli.py
   models/      test_config.py, test_result.py, script.py, scenario.py, infra.py, account.py, schedule.py
-  services/    jmeter_plan_builder.py, test_executor.py, result_analyzer.py, security.py, auth.py,
-               har_parser.py, jmx_importer.py, xmlsafe.py, request_filter.py, correlation.py, autocorrelate.py,
-               script_builder.py, debug_runner.py, scenario_builder.py, scenario_analyzer.py,
-               analysis.py, report.py, report_pdf.py, report_docx.py, monitoring.py, scheduler.py
-  routers/     tests.py, reports.py, scripts.py, debug.py, scenarios.py, schedules.py, infra.py,
+  services/    jmeter_plan_builder.py, load_profile.py, test_executor.py, result_analyzer.py, security.py,
+               auth.py, har_parser.py, jmx_importer.py, xmlsafe.py, request_filter.py, correlation.py,
+               autocorrelate.py, script_builder.py, har_validator.py, debug_runner.py, scenario_builder.py,
+               scenario_analyzer.py, analysis.py, report.py, report_pdf.py, report_docx.py, monitoring.py,
+               scheduler.py
+  routers/     dashboard.py, tests.py, reports.py, scripts.py, debug.py, scenarios.py, schedules.py, infra.py,
                auth.py, users.py, projects.py
 backend/agent/ perf_agent.py (server monitor agent, standard library only)
-backend/tests/ unit + end-to-end tests, sample_app.py, fake_jmeter.py, recorder.py, recordings.py
+backend/tests/ unit + end-to-end tests, sample_app.py (with the /demo page), fake_jmeter.py, recorder.py,
+               recordings.py
 frontend/      index.html and js/ (the dashboard, served by the backend); tests/smoke.js
-config/        sample.yaml, step-load.yaml
+config/        sample.yaml, step-load.yaml, spike.yaml, breakpoint.yaml
 scripts/       dev.sh
 ```

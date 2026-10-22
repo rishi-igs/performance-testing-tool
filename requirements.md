@@ -65,11 +65,15 @@ The tool should allow the user to control the number of virtual users over time.
 - Pauses
 - Multiple test phases
 
+Each step changes the number of users at its time, over its `ramp` if it has one (otherwise at once). These examples run as written (`python -m app.cli run <file>`):
+
 Example spike configuration:
 
 ```yaml
+name: Checkout spike
 test_type: spike
 target_url: https://api.example.com/checkout
+duration_seconds: 60
 profile:
   - time: 0s
     users: 5
@@ -82,8 +86,10 @@ profile:
 Example stress configuration:
 
 ```yaml
+name: Checkout stress
 test_type: stress
 target_url: https://api.example.com/checkout
+duration_seconds: 120
 profile:
   - time: 0s
     users: 10
@@ -95,16 +101,20 @@ profile:
     users: 500
 ```
 
-Example soak configuration:
+Example soak configuration (raise `MAX_DURATION_SECONDS` for runs this long):
 
 ```yaml
+name: Products soak
 test_type: soak
 target_url: https://api.example.com/products
+duration_seconds: 24h
 profile:
   - time: 0s
     users: 50
-  - time: 24h
-    users: 50
+    ramp: 5m
+  - time: 1435m          # 23 h 55 min: ramp down over the last 5 minutes
+    users: 0
+    ramp: 5m
 ```
 
 ## 7. Core Functional Requirements
@@ -500,49 +510,68 @@ performance-tool/
 
 ## 13. Implementation Roadmap
 
+Status of each phase, as of 19 October 2026 (details and API in the README):
+
+| Phase | Status |
+| --- | --- |
+| 1. Basic load generator | Done |
+| 2. Traffic profiles | Done |
+| 3. HAR import, script preparation, and debugging | Done; the exit check in a real browser is a manual step (README, "Acceptance check in a real browser") |
+| 4. Dashboard | Done |
+| 5 to 9 | Not complete. Parts exist already: automated warnings (5), server monitors (6), the CLI gate and baselines (7), and load generators (8) |
+
 ### Phase 1: Basic Load Generator
 
 Create a FastAPI application that accepts a target URL, user count, duration, and request method. Generate a basic JMeter plan, run JMeter headlessly, read the result file, display basic metrics, and store results.
 
+**Status: done.** `POST /tests` takes the test configuration (section 7), generates the plan, runs JMeter headlessly, stores the results and returns a test id; status, live metrics, stop, HTML report and downloads (metrics, raw results, plan, log) work for every run.
+
 ### Phase 2: Traffic Profiles
 
-Step-load profiles are implemented. Each increasing step adds users at its configured offset,
-and those users stay active until the test duration ends. The final step must start before the
-test ends and match the configured peak `users`; `ramp_up_seconds` must be zero when a profile
-is used. Omitting the profile retains the existing fixed-user behavior.
+**Status: done.** A profile is a list of steps: at `time`, change to `users`, over `ramp` (0 = at once). That covers every profile in section 6: constant, ramp-up, step, sudden spike, wave, long flat, gradual increase until failure, load reduction, pauses (a step with 0 users) and multiple phases. The steps become standard Thread Groups (start delay, ramp-up, duration; a ramp-down is split into up to 10 groups that stop one after another), so no JMeter plugins are needed.
+
+- Quick tests take `test_type` (section 5) and `profile`; the dashboard fills in a starting profile for each test type and draws the planned users, which the results chart shows next to the users that actually ran.
+- Scenarios take the same steps as a schedule shape, scaled to each group's users.
+- `stop_when` stops a run once the error rate or the 95th percentile of the last seconds passes a limit, and reports the load at that moment (the breaking point), for stress and breakpoint tests.
 
 ```yaml
-users: 100
-duration_seconds: 90
-ramp_up_seconds: 0
+test_type: stress
+duration_seconds: 120
 profile:
-  - time_seconds: 0
+  - time: 0s
     users: 10
-  - time_seconds: 30
-    users: 50
-  - time_seconds: 60
+  - time: 30s
     users: 100
+    ramp: 10s
+  - time: 60s
+    users: 0           # a pause
+  - time: 75s
+    users: 250
+stop_when:
+  error_rate_percent: 5
+  for_seconds: 10
 ```
-
-Still to add in this phase: ramp-up profiles, spikes, soak, load ramp-down, pauses, and
-multiple test phases.
 
 ### Phase 3: HAR Import, Script Preparation, and Debugging
 
-- 3A. Parse the HAR file and generate a basic JMeter plan.
-- 3B. Request filtering and review screen (8.3).
-- 3C. Dynamic value detection and correlation rules, with manual override (8.2).
-- 3D. Parameterization with CSV Data Set support (8.4).
-- 3E. HAR comparison validator (8.5).
-- 3F. Assertion builder (8.6).
-- 3G. Debug run mode and results viewer (8.7).
-- 3H. Failure diagnosis and one-click re-run (8.8).
+- 3A. Parse the HAR file and generate a basic JMeter plan. **Done** (a JMeter `.jmx` can be imported too).
+- 3B. Request filtering and review screen (8.3). **Done**: every rule in 8.3, including repeated polling (optional); filters by domain, method, type and status code; bulk actions; reordering; business functions; the captured/kept/excluded summary.
+- 3C. Dynamic value detection and correlation rules, with manual override (8.2). **Done**: automatic at HAR import, by replay for `.jmx` files, and by hand (JSON, regular expression and boundary extractors).
+- 3D. Parameterization with CSV Data Set support (8.4). **Done**: CSV files (delimiter, variable names, recycle, stop at the end, sharing mode), lists and generated values; a preview of where each variable is used; a warning when a file has fewer rows than users and does not recycle.
+- 3E. HAR comparison validator (8.5). **Done**: endpoint, headers, body, tokens and order for every request, side by side, with differences by type, the unresolved values (each with correlate, parameterize or mark static), and Pass, Pass with warnings or Fail. It runs before every debug run and every scenario run, and a failing script cannot start a scenario.
+- 3F. Assertion builder (8.6). **Done**: every assertion type, on every request, a business function or one request; suggestions from the recording; failed assertions counted apart from HTTP errors; a warning for requests without assertions.
+- 3G. Debug run mode and results viewer (8.7). **Done**: 1 user by default, up to 5 users and 5 iterations; request, response, timing, assertions and variables per request; failed-only filter; search in bodies; credentials masked unless a tester reveals them.
+- 3H. Failure diagnosis and one-click re-run (8.8). **Done**: the first failure highlighted, every symptom in the 8.8 table with its likely cause and fix, links to the editor that fixes it, re-run keeping all edits, the last 10 runs kept and comparable, the JMeter log and raw results downloadable.
 
 **Exit criteria:** an authenticated multi-step flow recorded from a real browser passes a debug run with all assertions green and no unresolved dynamic values.
+
+**Status:** met in automated tests with real JMeter 5.6.3, for the sign-in and order flow of the sample app's `/demo` page, recorded by a scripted client. Recording that page in a real browser is a manual check (README, "Acceptance check in a real browser").
 
 ### Phase 4: Dashboard
 
 Display test status, latency and throughput charts, errors, alerts, and comparisons between test runs. The debug results viewer from Phase 3G can be reused here.
+
+**Status: done.** The Overview (start page) shows running tests with live numbers, alerts from the latest runs and recent results with their verdicts. Each run has live latency, throughput, error and user charts (with the planned users), findings, status codes, an analysis graph builder, error statistics, comparison with another run, trends against a baseline for scenarios, and HTML, PDF and Word reports.
 
 ### Phase 5: Automated Analysis
 
