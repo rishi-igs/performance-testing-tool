@@ -11,7 +11,7 @@ from ..deps import viewer as require_api_key
 from ..models.scenario import ScenarioConfig
 from ..models.test_config import LoadTestConfig
 from ..models.test_result import TestCreated, TestRecord
-from ..services import analysis, result_analyzer, scenario_analyzer
+from ..services import analysis, load_profile, result_analyzer, scenario_analyzer
 from ..services.monitoring import monitor_series
 from ..services.security import TargetNotAllowed, check_target
 from ..services.test_executor import TooManyTests, run_paths
@@ -54,6 +54,11 @@ def create_test(config: LoadTestConfig, request: Request, project: str | None = 
     except TargetNotAllowed as exc:
         audit.warning("REJECTED target by=%s url=%s reason=%s", who, config.target_url, exc)
         raise HTTPException(422, str(exc)) from exc
+    if config.profile:
+        try:
+            load_profile.cohorts(config.profile, config.duration_seconds, lambda *_: "")
+        except load_profile.ProfileError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     test_id = f"t_{uuid.uuid4().hex[:10]}"
     db = request.app.state.db
@@ -67,7 +72,8 @@ def create_test(config: LoadTestConfig, request: Request, project: str | None = 
     except Exception as exc:  # noqa: BLE001
         db.update_test(test_id, status="failed", error=f"Could not start test: {exc}")
         raise HTTPException(500, f"Could not start test: {exc}") from exc
-    audit.info("START test=%s by=%s url=%s users=%s duration=%ss", test_id, who, config.target_url, config.users, config.duration_seconds)
+    audit.info("START test=%s by=%s url=%s type=%s users=%s duration=%ss", test_id, who, config.target_url,
+               config.test_type, config.users, config.duration_seconds)
     return TestCreated(id=test_id, status="running")
 
 

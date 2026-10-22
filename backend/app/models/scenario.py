@@ -12,11 +12,18 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .script import RuntimeSettings
+from .test_config import StopCondition, TrafficStep, check_profile
 
 MAX_DAY = 7 * 86_400
 
 
 class Schedule(BaseModel):
+    """Start after a delay, ramp up, hold, ramp down; or follow a profile of steps.
+
+    With a profile, `duration_seconds` is the whole run and the steps give the shape: each group
+    follows it scaled so that the highest step equals the group's users.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     start_delay_seconds: int = Field(0, ge=0, le=MAX_DAY)
@@ -25,14 +32,22 @@ class Schedule(BaseModel):
     ramp_down_seconds: int = Field(0, ge=0, le=MAX_DAY, description="users stop evenly over this time")
     iterations: int | None = Field(None, ge=1, le=1_000_000,
                                    description="instead of a duration: each user runs this many iterations")
+    profile: list[TrafficStep] | None = Field(None, min_length=2, max_length=100,
+                                              description="steps of users over time, scaled to each group")
 
     @model_validator(mode="after")
     def _check(self) -> "Schedule":
         if self.iterations and self.ramp_down_seconds:
             raise ValueError("a ramp-down needs a duration, not a number of iterations")
+        if self.profile is not None:
+            if self.iterations or self.start_delay_seconds or self.ramp_up_seconds or self.ramp_down_seconds:
+                raise ValueError("a profile replaces the start delay, ramp-up, ramp-down and iterations: set them to 0")
+            check_profile(self.profile, self.duration_seconds)
         return self
 
     def total_seconds(self) -> int:
+        if self.profile is not None:
+            return self.duration_seconds
         return self.start_delay_seconds + self.ramp_up_seconds + self.duration_seconds + self.ramp_down_seconds
 
 
@@ -98,6 +113,7 @@ class ScenarioConfig(BaseModel):
     bandwidth_kbps: int | None = Field(None, ge=8, le=10_000_000, description="network speed per user; empty = unlimited")
     generators: list[str] = Field(default_factory=list, max_length=100)
     monitors: list[str] = Field(default_factory=list, max_length=100)
+    stop_when: StopCondition | None = Field(None, description="stop at the breaking point instead of running on")
 
     @model_validator(mode="after")
     def _check(self) -> "ScenarioConfig":
@@ -121,8 +137,8 @@ class ScenarioConfig(BaseModel):
                 raise ValueError("a goal-oriented scenario needs a goal")
             if any(g.schedule is not None for g in active):
                 raise ValueError("a goal-oriented scenario uses one schedule for all groups")
-            if self.schedule.ramp_down_seconds or self.schedule.iterations:
-                raise ValueError("a goal-oriented scenario runs for a duration without ramp-down")
+            if self.schedule.ramp_down_seconds or self.schedule.iterations or self.schedule.profile:
+                raise ValueError("a goal-oriented scenario runs for a duration without ramp-down or profile")
         for r in self.rendezvous:
             if r.group.lower() not in names:
                 raise ValueError(f"rendezvous {r.name}: there is no group {r.group}")

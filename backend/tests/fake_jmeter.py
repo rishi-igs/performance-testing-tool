@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """TEST DOUBLE for Apache JMeter. Not part of the product.
 
-Understands just enough of the command line (-n -t -l -j -e -o -g -J) and of the .jmx files
+Understands just enough of the command line (-n -t -l -j -e -o -g -J, and the control port that
+"StopTestNow" is sent to) and of the .jmx files
 this tool writes to send real HTTP requests and write results in JMeter's CSV or XML format:
 thread groups (users, ramp-up, duration, delay, loops), Transaction Controllers, HTTP requests
 with Header Managers, a cookie jar, User Defined Variables, CSV Data Sets, Counters, JSON /
@@ -16,6 +17,7 @@ import json
 import random
 import re
 import signal
+import socket
 import sys
 import threading
 import time
@@ -136,7 +138,9 @@ class Plan:
             return
         if el.tag == "CSVDataSet":
             file = self.path.parent / prop(el, "filename")
-            rows = list(csv.reader(file.open(encoding="utf-8"))) if file.exists() else []
+            delimiter = prop(el, "delimiter") or ","
+            delimiter = "\t" if delimiter == "\\t" else delimiter
+            rows = list(csv.reader(file.open(encoding="utf-8"), delimiter=delimiter)) if file.exists() else []
             if prop(el, "ignoreFirstLine") == "true":
                 rows = rows[1:]
             self.csv_sets.append({"names": prop(el, "variableNames").split(","), "rows": rows, "next": 0,
@@ -291,8 +295,22 @@ def main(argv):
         return 0
     # Tests check the command line (for example -R for distributed engines).
     (Path(args["-l"]).parent / "fake_argv.json").write_text(json.dumps(argv), encoding="utf-8")
+    if "-j" in args:                                     # like JMeter, keep a log of the run
+        Path(args["-j"]).write_text(f"INFO o.a.j.JMeter: Fake JMeter running {Path(args['-t']).name}\n", encoding="utf-8")
 
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    port = next((j.split("=", 1)[1] for j in args["-J"] if j.startswith("-Jjmeterengine.nongui.port=")), None)
+    if port:                                  # like JMeter: "StopTestNow" or "Shutdown" on the control port
+        listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        listener.bind(("127.0.0.1", int(port)))
+
+        def listen():
+            while not stop.is_set():
+                data, _ = listener.recvfrom(64)
+                if data in (b"StopTestNow", b"Shutdown"):
+                    stop.set()
+
+        threading.Thread(target=listen, daemon=True).start()
     plan = Plan(args["-t"])
     xml = any(j.endswith("output_format=xml") for j in args["-J"]) and \
         [j for j in args["-J"] if "output_format=" in j][-1].endswith("xml")

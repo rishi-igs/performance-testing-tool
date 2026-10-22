@@ -21,8 +21,9 @@ from typing import Any
 
 from ..models.scenario import Group, ScenarioConfig, Schedule
 from ..models.script import FilterRules
-from . import request_filter, xmlsafe
+from . import load_profile, request_filter, xmlsafe
 from .jmeter_plan_builder import _element, _prop, _test_plan, add_variable, serialize
+from .load_profile import Cohort
 from .script_builder import _pause, _regular_thread_groups, build_tree
 
 MAX_COHORTS = 10
@@ -32,16 +33,6 @@ _NUMBER = re.compile(r"^\d{2,} ")
 
 class ScenarioError(ValueError):
     """The scenario cannot be built; the message is shown to the user."""
-
-
-@dataclass
-class Cohort:
-    users: int
-    delay: int          # seconds after the test starts
-    ramp: int
-    duration: int | None  # seconds after its own start; None = run its iterations
-    loops: int | None
-    label: str
 
 
 @dataclass
@@ -58,6 +49,18 @@ class ScenarioPlan:
 
 def cohorts(users: int, schedule: Schedule, name: str) -> list[Cohort]:
     """Thread Groups that together follow the schedule (users start and stop evenly)."""
+    if schedule.profile is not None:
+        steps = load_profile.scaled(schedule.profile, users)
+        if not steps:
+            raise ScenarioError(f"{name}: the profile scaled to {users} user(s) never starts anyone")
+
+        def label(step: int, level: int, part: int, parts: int) -> str:
+            return f"{name} · step {step + 1}" + (f" ({part}/{parts})" if parts > 1 else "")
+
+        try:
+            return load_profile.cohorts(steps, schedule.duration_seconds, label)
+        except load_profile.ProfileError as exc:
+            raise ScenarioError(f"{name}: {exc}") from exc
     delay, ramp = schedule.start_delay_seconds, schedule.ramp_up_seconds
     if schedule.iterations:
         return [Cohort(users, delay, ramp, None, schedule.iterations, name)]
@@ -285,8 +288,11 @@ def build_scenario(cfg: ScenarioConfig, scripts: dict[str, dict[str, Any]],
                         new_tree.insert(0, sub)
                         new_tree.insert(0, action)
                 made.append({"name": cohort.label, "users": per_engine * engines})
+        # A profile's thread groups take turns (waves, pauses), so they are not all running at once.
+        peak = max(1, round(users / engines)) * engines * len(script_groups) if schedule.profile else \
+            sum(tg["users"] for tg in made)
         groups_info.append({"name": group.name, "script_id": group.script_id, "script": script["name"],
-                            "users": users, "thread_groups": made, "transactions": transactions,
+                            "users": users, "peak_users": peak, "thread_groups": made, "transactions": transactions,
                             "schedule": schedule.model_dump()})
 
     for name, value in udv.items():
@@ -298,7 +304,7 @@ def build_scenario(cfg: ScenarioConfig, scripts: dict[str, dict[str, Any]],
     if cfg.bandwidth_kbps:
         cps = cfg.bandwidth_kbps * 1000 // 8
         properties = [f"-Jhttpclient.socket.http.cps={cps}", f"-Jhttpclient.socket.https.cps={cps}"]
-    total_users = sum(tg["users"] for g in groups_info for tg in g["thread_groups"])
+    total_users = sum(g["peak_users"] for g in groups_info)
     return ScenarioPlan(xml=xmlsafe.restore(serialize(root)), files=files, properties=properties,
                         hosts=sorted(hosts), groups=groups_info, warnings=warnings,
                         duration_seconds=total_seconds, total_users=total_users)

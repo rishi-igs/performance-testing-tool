@@ -6,10 +6,11 @@ const SLA_METRICS = [["p90", "90th percentile (ms)"], ["p95", "95th percentile (
 const SPEEDS = [["", "Unlimited"], ["128", "128 kbps"], ["512", "512 kbps"], ["1000", "1 Mbps"], ["2000", "2 Mbps"],
   ["10000", "10 Mbps"], ["100000", "100 Mbps"]];
 
-const blankSchedule = () => ({ start_delay_seconds: 0, ramp_up_seconds: 30, duration_seconds: 300, ramp_down_seconds: 0, iterations: null });
+const blankSchedule = () => ({ start_delay_seconds: 0, ramp_up_seconds: 30, duration_seconds: 300, ramp_down_seconds: 0,
+  iterations: null, profile: null });
 const newScenario = () => ({ name: "New scenario", mode: "manual", distribution: "users", total_users: null,
   schedule: blankSchedule(), groups: [], rendezvous: [], sla: [], goal: null, bandwidth_kbps: null,
-  generators: [], monitors: [] });
+  generators: [], monitors: [], stop_when: null });
 
 async function refreshScenarios() {
   state.scenarios = await api(inProject("/scenarios"));
@@ -115,9 +116,43 @@ function bind(obj, key, transform = (v) => v) {
 }
 function rerender(fn) { return (e) => { fn(e); renderScenario(focusedKey()); }; }
 
-function scheduleFields(sch, prefix) {
+function scheduleTotal(sch) {
+  return Array.isArray(sch.profile) ? sch.duration_seconds
+    : sch.start_delay_seconds + sch.ramp_up_seconds + sch.duration_seconds + sch.ramp_down_seconds;
+}
+
+// Ramp up, hold and ramp down; or steps over time (a profile), which each group follows scaled to its users.
+function shapeChoice(sch, prefix, goal) {
+  if (goal) return null;
+  return field("Shape", choice("shape", [["ramp", "Ramp up, hold, ramp down"], ["profile", "Steps over time"]],
+    Array.isArray(sch.profile) ? "profile" : "ramp", { "data-key": `${prefix}-shape`, onchange: rerender((e) => {
+      if (e.target.value === "profile") {
+        const total = Math.max(60, scheduleTotal(sch));
+        Object.assign(sch, { start_delay_seconds: 0, ramp_up_seconds: 0, ramp_down_seconds: 0, iterations: null,
+          duration_seconds: total, profile: [{ time_seconds: 0, users: 100, ramp_seconds: Math.round(total * 0.1) },
+            { time_seconds: Math.round(total * 0.8), users: 0, ramp_seconds: Math.round(total * 0.1) }] });
+      } else Object.assign(sch, { profile: null, ramp_up_seconds: 30, duration_seconds: 300 });
+    }) }));
+}
+
+function profileFields(sch, prefix) {
+  return h("div", { class: "schedule" },
+    shapeChoice(sch, prefix, false),
+    field("Whole run (s)", h("input", { type: "number", min: 1, value: sch.duration_seconds, "data-key": `${prefix}-total`,
+      oninput: bind(sch, "duration_seconds", Number) })),
+    h("label", { class: "wide" }, "Steps, one per line: time:users:ramp",
+      h("textarea", { rows: 4, "data-key": `${prefix}-profile`, onchange: (e) => {
+        try { sch.profile = parseProfile(e.target.value); scenarioError(""); }
+        catch (ex) { scenarioError(`Schedule: ${ex.message}`); }
+      } }, profileText(sch.profile)),
+      h("small", {}, "The steps give the shape: each group follows them with its highest step at the group's users, so 100 means all of a group's users and 50 half of them.")));
+}
+
+function scheduleFields(sch, prefix, goal = false) {
+  if (Array.isArray(sch.profile)) return profileFields(sch, prefix);
   const iter = sch.iterations != null;
   return h("div", { class: "schedule" },
+    shapeChoice(sch, prefix, goal),
     field("Start after (s)", h("input", { type: "number", min: 0, value: sch.start_delay_seconds, "data-key": `${prefix}-delay`,
       oninput: bind(sch, "start_delay_seconds", Number) })),
     field("Ramp-up (s)", h("input", { type: "number", min: 0, value: sch.ramp_up_seconds, "data-key": `${prefix}-ramp`,
@@ -202,6 +237,24 @@ function slaSection(d) {
     h("button", { class: "btn quiet small", type: "button", onclick: rerender(() => d.sla.push({ transaction: "*", metric: "p90", limit: 2000 })) }, "Add an SLA"));
 }
 
+// Stop the run once the last seconds go over a limit: the load at that moment is the breaking point.
+function stopWhenFields(d) {
+  const sw = d.stop_when;
+  const set = (key) => (e) => {
+    const value = e.target.value === "" ? null : Number(e.target.value);
+    const next = { error_rate_percent: null, p95_ms: null, for_seconds: 10, ...(d.stop_when || {}), [key]: value };
+    d.stop_when = next.error_rate_percent == null && next.p95_ms == null ? null : next;
+  };
+  return h("div", { class: "subsection" }, h("h3", {}, "Stop at the breaking point (optional)"),
+    h("div", { class: "schedule" },
+      field("Errors over (%)", h("input", { type: "number", min: 0.1, max: 100, step: "any", placeholder: "off",
+        value: sw && sw.error_rate_percent != null ? sw.error_rate_percent : "", "data-key": "sw-errors", oninput: set("error_rate_percent") })),
+      field("Or p95 over (ms)", h("input", { type: "number", min: 1, placeholder: "off",
+        value: sw && sw.p95_ms != null ? sw.p95_ms : "", "data-key": "sw-p95", oninput: set("p95_ms") })),
+      field("For at least (s)", h("input", { type: "number", min: 1, max: 3600, value: sw ? sw.for_seconds : 10,
+        "data-key": "sw-for", oninput: (e) => { if (d.stop_when) d.stop_when.for_seconds = Number(e.target.value) || 10; } }))));
+}
+
 function previewChart() {
   const p = state.preview;
   if (!p) return h("p", { class: "empty" }, state.scenarioId ? "Loading the schedule…" : "Save the scenario to see its schedule.");
@@ -253,7 +306,9 @@ function renderScenario(focusKey) {
         field("Type", choice("mode", [["manual", "Manual: users and schedule"], ["goal", "Goal-oriented: hold a throughput"]], d.mode,
           { "data-key": "sc-mode", onchange: rerender((e) => { d.mode = e.target.value;
             if (d.mode === "goal") { d.goal = d.goal || { type: "transactions_per_second", target: 10, max_users: 50 };
-              d.groups.forEach(g => { g.schedule = null; }); d.schedule.ramp_down_seconds = 0; d.schedule.iterations = null; d.distribution = "users"; }
+              d.groups.forEach(g => { g.schedule = null; }); d.distribution = "users";
+              if (d.schedule.profile) Object.assign(d.schedule, { profile: null, ramp_up_seconds: 30, duration_seconds: 300 });
+              d.schedule.ramp_down_seconds = 0; d.schedule.iterations = null; }
             else d.goal = null; }) })),
         d.mode === "manual" ? field("Users are given", choice("dist", [["users", "Per group"], ["percent", "As a share of a total"]], d.distribution,
           { "data-key": "sc-dist", onchange: rerender((e) => { d.distribution = e.target.value; if (d.distribution === "percent") { d.total_users = d.total_users || 100;
@@ -268,7 +323,8 @@ function renderScenario(focusKey) {
       field("With at most this many users", h("input", { type: "number", min: 1, class: "short", value: d.goal.max_users, oninput: bind(d.goal, "max_users", Number) }),
         "Shared out by each group's weight. Use no think time, so throughput is not capped by pauses.")) : null,
 
-    h("div", { class: "section" }, h("h2", {}, "Schedule"), scheduleFields(d.schedule, "s")),
+    h("div", { class: "section" }, h("h2", {}, "Schedule"), scheduleFields(d.schedule, "s", d.mode === "goal"),
+      stopWhenFields(d)),
     h("div", { class: "section" }, h("h2", {}, "Groups"), groupsTable(d),
       h("button", { class: "btn quiet small", type: "button", disabled: !state.scripts.length, onclick: async () => {
         const script = state.scripts[0];

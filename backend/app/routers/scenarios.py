@@ -244,15 +244,20 @@ def start_scenario_run(state: Any, scenario: dict[str, Any], who: str) -> dict[s
             series = monitor_series(outcome.paths["dir"])
             summary["warnings"] += monitor_warnings(series, min((s.ts for s in samples), default=None))
             summary["monitor_errors"] = monitor_errors(outcome.paths["dir"])
+        if outcome.breaking_point:
+            result_analyzer.add_breaking_point(summary, outcome.breaking_point)
         status, error = finish_status(outcome, has_results=bool(samples))
         db.update_test(rid, status=status, exit_code=outcome.exit_code, error=error, finished_at=now_iso(),
                        summary_json=json.dumps(summary))
 
     duration = plan.duration_seconds if not any(cfg.schedule_for(g).iterations for g in cfg.active_groups()) \
         else settings.max_duration_seconds
+    watch = None
+    if cfg.stop_when is not None:
+        watch = result_analyzer.BreakingPoint(run_paths(settings, run_id)["jtl"], cfg.stop_when).check
     try:
         state.executor.launch(run_id, plan.xml, duration_seconds=duration, files=plan.files,
-                              properties=tuple(properties), finish=finish,
+                              properties=tuple(properties), finish=finish, watch=watch,
                               on_start=lambda rid: db.update_test(rid, started_at=now_iso()))
     except TooManyTests as exc:
         db.update_test(run_id, status="failed", error=str(exc), finished_at=now_iso())

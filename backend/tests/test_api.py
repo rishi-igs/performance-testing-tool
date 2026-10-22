@@ -57,7 +57,8 @@ def test_failing_endpoint_gets_critical_verdict_and_readable_warning(client, tar
     m = wait_for(client, test_id)["metrics"]
     assert m["error_rate_percent"] == 100 and m["verdict"] == "fail"
     codes = {w["code"] for w in m["warnings"]}
-    assert {"error_rate", "http_5xx", "assertion_failures"} <= codes
+    assert {"error_rate", "http_5xx", "unexpected_status"} <= codes
+    assert m["status_code_failures"] == m["total_requests"] and m["assertion_failures"] == 0
 
 
 def test_expected_status_codes_are_respected(client, target_url):
@@ -81,7 +82,31 @@ def test_step_profile_runs_and_is_returned_in_test_config(client, target_url):
     assert result["status"] == "completed", result
     assert result["metrics"]["peak_users"] == 3
     saved = client.get(f"/tests/{test_id}").json()["config"]
-    assert saved["profile"] == config["profile"]
+    assert saved["profile"] == [{**step, "ramp_seconds": 0} for step in config["profile"]]
+
+
+def test_a_breakpoint_test_stops_itself_when_the_errors_pass_the_limit(client, target_url):
+    config = body(target_url, "/status/500", test_type="breakpoint", duration_seconds=40, users=4,
+                  profile=[{"time": 0, "users": 1}, {"time": 1, "users": 4, "ramp": 10}],
+                  stop_when={"error_rate_percent": 50, "for_seconds": 2})
+    t0 = time.time()
+    test_id = client.post("/tests", json=config).json()["id"]
+    result = wait_for(client, test_id, timeout=30)
+    assert time.time() - t0 < 20, "the run should stop long before its 40 s"
+    assert result["status"] == "completed", result
+    m = result["metrics"]
+    point = m["breaking_point"]
+    assert point["error_rate_percent"] > 50 and point["users"] >= 1 and "errors reached" in point["reason"]
+    assert m["warnings"][0]["code"] == "breaking_point" and m["verdict"] == "fail"
+    assert client.get(f"/tests/{test_id}").json()["config"]["test_type"] == "breakpoint"
+
+
+def test_profiles_that_need_too_many_thread_groups_are_refused(tmp_path, target_url):
+    waves = [{"time": i * 10, "users": 30 if i % 2 == 0 else 1, "ramp": 5} for i in range(80)]
+    with TestClient(create_app(make_settings(tmp_path, max_duration_seconds=1000))) as c:
+        r = c.post("/tests", json=body(target_url, users=30, duration_seconds=900, profile=waves))
+        assert r.status_code == 422 and "thread groups" in r.json()["detail"]
+        assert c.get("/tests").json() == []                 # nothing was stored or started
 
 
 def test_connection_failures_detected(client):

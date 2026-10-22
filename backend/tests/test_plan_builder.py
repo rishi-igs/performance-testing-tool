@@ -68,3 +68,13 @@ def test_step_profile_generates_incremental_scheduled_thread_groups():
     assert [prop(group, "ThreadGroup.ramp_time") for group in groups] == ["0", "0", "0"]
     assert len(root.findall(".//HTTPSamplerProxy")) == 3
     assert [prop(sampler, "HTTPSampler.method") for sampler in root.findall(".//HTTPSamplerProxy")] == ["GET"] * 3
+
+
+def test_a_wave_profile_ramps_up_pauses_and_comes_back():
+    root = plan(duration_seconds=120, profile=[
+        {"time": 0, "users": 10, "ramp": 10}, {"time": 40, "users": 0}, {"time": 60, "users": 10}])
+    groups = root.findall(".//ThreadGroup")
+    rows = [(prop(g, "ThreadGroup.num_threads"), prop(g, "ThreadGroup.delay"), prop(g, "ThreadGroup.ramp_time"),
+             prop(g, "ThreadGroup.duration"), g.get("testname")) for g in groups]
+    assert rows == [("10", "0", "10", "40", "Step 1: 10 users"), ("10", "60", "0", "60", "Step 3: 10 users")]
+    assert all(prop(g, "ThreadGroup.scheduler") == "true" for g in groups)

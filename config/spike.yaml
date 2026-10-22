@@ -1,0 +1,17 @@
+# Spike test: 5 users, a sudden jump to 50, then back to 5. Run it with:
+#   cd backend && python -m app.cli run ../config/spike.yaml
+# Each step changes the number of users at its time; "ramp" spreads the change over that long.
+name: Local spike example
+test_type: spike
+target_url: http://127.0.0.1:9000/slow?ms=100
+duration_seconds: 60
+profile:
+  - time: 0s
+    users: 5
+  - time: 20s
+    users: 50
+  - time: 40s
+    users: 5
+thresholds:
+  max_error_rate_percent: 1.0
+  max_p95_ms: 1000

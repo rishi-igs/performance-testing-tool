@@ -11,18 +11,140 @@ function parseHeaders(text) {
   }
   return headers;
 }
+// ---- Traffic profiles ------------------------------------------------------------------
+// One step per line, time:users or time:users:ramp. The server turns the steps into thread groups.
+
+const TEST_TYPES = { load: "Load", stress: "Stress", spike: "Spike", soak: "Soak", volume: "Volume",
+  scalability: "Scalability", breakpoint: "Breakpoint" };
+const UNIT_SECONDS = { ms: 0.001, s: 1, sec: 1, m: 60, min: 60, h: 3600, hr: 3600, d: 86400 };
+
+function parseDuration(text, what) {
+  const m = String(text).trim().match(/^(\d+(?:\.\d+)?)\s*(ms|s|sec|m|min|h|hr|d)?$/i);
+  if (!m) throw new Error(`${what} "${text}" must be seconds, or a number with s, m or h`);
+  return Math.round(+m[1] * UNIT_SECONDS[(m[2] || "s").toLowerCase()]);
+}
 function parseProfile(text) {
   const lines = text.split("\n").map(line => line.trim()).filter(Boolean);
   return lines.map((line, i) => {
-    const match = line.match(/^(\d+)\s*:\s*(\d+)$/);
-    if (!match) throw new Error(`Profile line ${i + 1} must look like seconds:users`);
-    return { time_seconds: +match[1], users: +match[2] };
+    const parts = line.split(":").map(s => s.trim());
+    if (parts.length < 2 || parts.length > 3 || !/^\d+$/.test(parts[1])) {
+      throw new Error(`Profile line ${i + 1} must look like time:users or time:users:ramp`);
+    }
+    return { time_seconds: parseDuration(parts[0], `Line ${i + 1}: the time`), users: +parts[1],
+      ramp_seconds: parts[2] ? parseDuration(parts[2], `Line ${i + 1}: the ramp`) : 0 };
   });
 }
+const showSeconds = (s) => (s >= 3600 && s % 3600 === 0 ? `${s / 3600}h` : s >= 60 && s % 60 === 0 ? `${s / 60}m` : `${s}s`);
+const profileText = (steps) => steps.map(s => `${showSeconds(s.time_seconds)}:${s.users}${s.ramp_seconds ? `:${showSeconds(s.ramp_seconds)}` : ""}`).join("\n");
+
+// The planned number of users as the corners of a line (the server's load_profile.curve).
+function profileCurve(profile, duration, users = 0, ramp = 0) {
+  if (!profile || !profile.length) return [{ t: 0, users: 0 }, { t: ramp, users }, { t: duration, users }];
+  const points = [{ t: 0, users: 0 }];
+  let level = 0;
+  for (const s of profile) {
+    if (s.users === level) continue;
+    points.push({ t: s.time_seconds, users: level }, { t: s.time_seconds + s.ramp_seconds, users: s.users });
+    level = s.users;
+  }
+  points.push({ t: duration, users: level });
+  return points;
+}
+function usersAt(curve, t) {
+  let value = 0;
+  for (let i = 0; i < curve.length; i++) {
+    const p = curve[i];
+    if (p.t <= t) { value = p.users; continue; }
+    const q = curve[i - 1];
+    if (q && p.t > q.t) value = q.users + (p.users - q.users) * (t - q.t) / (p.t - q.t);
+    break;
+  }
+  return value;
+}
+
+// A starting point for each test type, with the peak and duration typed in the form.
+function profileTemplate(type, users, duration) {
+  const u = Math.max(1, users), d = Math.max(10, duration);
+  const at = (f) => Math.round(d * f), share = (f) => Math.max(1, Math.round(u * f));
+  const rows = {
+    stress: [[0, share(0.25)], [at(0.2), share(0.5)], [at(0.4), share(0.75)], [at(0.6), u]],
+    spike: [[0, share(0.1)], [at(0.3), u], [at(0.5), share(0.1)]],
+    scalability: [[0, share(1 / 3)], [at(1 / 3), share(2 / 3)], [at(2 / 3), u]],
+    breakpoint: [[0, 1], [1, u, d - 2]],
+  }[type];
+  if (!rows) return { profile: [], ramp: type === "soak" ? Math.min(300, at(0.1)) : at(0.1) };
+  const steps = [];
+  for (const [t, n, r = 0] of rows) if (!steps.length || steps[steps.length - 1].users !== n) steps.push({ time_seconds: t, users: n, ramp_seconds: r });
+  return { profile: steps.length > 1 ? steps : [], ramp: steps.length > 1 ? 0 : at(0.1) };
+}
+
+// A new test type fills in its template; changing the peak or duration keeps a generated profile
+// in step. Anything the user wrote is left alone.
+let lastTemplate = "";
+function applyTemplate(form, typeChanged) {
+  const el = form.elements;
+  const current = el.profile.value.trim();
+  if (current !== lastTemplate && (current || !typeChanged)) return;
+  const t = profileTemplate(el.test_type.value, +el.users.value, +el.duration_seconds.value);
+  lastTemplate = profileText(t.profile);
+  el.profile.value = lastTemplate;
+  if (typeChanged) el.ramp_up_seconds.value = t.ramp;
+  if (typeChanged && el.test_type.value === "breakpoint" && !el.stop_error_rate.value && !el.stop_p95_ms.value) {
+    el.stop_error_rate.value = 5;
+  }
+}
+
+function profileSvg(curve, peak, duration) {
+  const ns = "http://www.w3.org/2000/svg", W = 300, H = 64;
+  const x = (t) => (duration ? (t / duration) * W : 0), y = (u) => H - 2 - (peak ? (u / peak) * (H - 6) : 0);
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("role", "img");
+  const line = curve.map(p => `${x(p.t).toFixed(1)},${y(p.users).toFixed(1)}`).join(" ");
+  const area = document.createElementNS(ns, "polygon");
+  area.setAttribute("points", `0,${H - 2} ${line} ${W},${H - 2}`);
+  area.setAttribute("fill", "rgba(15,110,140,.14)");
+  const stroke = document.createElementNS(ns, "polyline");
+  stroke.setAttribute("points", line);
+  stroke.setAttribute("fill", "none");
+  stroke.setAttribute("stroke", "#0f6e8c");
+  stroke.setAttribute("stroke-width", "2");
+  stroke.setAttribute("vector-effect", "non-scaling-stroke");
+  svg.append(area, stroke);
+  return svg;
+}
+
+function renderProfilePreview(form) {
+  const box = $("#profilepreview");
+  if (!box || !document.createElementNS) return;
+  const el = form.elements;
+  box.className = "profilepreview";
+  try {
+    const profile = parseProfile(el.profile.value), duration = +el.duration_seconds.value || 0;
+    const curve = profileCurve(profile, duration, +el.users.value, +el.ramp_up_seconds.value);
+    const peak = Math.max(...curve.map(p => p.users));
+    const svg = profileSvg(curve, peak, duration);
+    svg.setAttribute("aria-label", `Planned users: up to ${peak} over ${duration} seconds`);
+    box.replaceChildren(svg, h("div", { class: "axis" }, h("span", {}, "0 s"), h("span", {}, `peak ${fmt(peak)} users`),
+      h("span", {}, `${fmt(duration)} s`)));
+  } catch (e) { box.className = "profilepreview bad"; box.replaceChildren(e.message); }
+}
+
+$("#form").addEventListener("change", (e) => {
+  if (e.target.name === "test_type") applyTemplate(e.currentTarget, true);
+  renderProfilePreview(e.currentTarget);
+});
+$("#form").addEventListener("input", (e) => {
+  if (["users", "duration_seconds"].includes(e.target.name)) applyTemplate(e.currentTarget, false);
+  if (["profile", "users", "duration_seconds", "ramp_up_seconds"].includes(e.target.name)) renderProfilePreview(e.currentTarget);
+});
+renderProfilePreview($("#form"));
+
 function formToConfig(f) {
   const v = (n) => f.elements[n].value;
   const cfg = {
-    name: v("name").trim(), target_url: v("target_url").trim(), method: v("method"),
+    name: v("name").trim(), target_url: v("target_url").trim(), method: v("method"), test_type: v("test_type"),
     users: +v("users"), duration_seconds: +v("duration_seconds"), ramp_up_seconds: +v("ramp_up_seconds"),
     think_time_ms: +v("think_time_ms"), timeout_ms: +v("timeout_ms"),
     expected_status_codes: v("expected_status_codes").split(",").map(s => parseInt(s, 10)).filter(Number.isInteger),
@@ -30,7 +152,13 @@ function formToConfig(f) {
     thresholds: { max_error_rate_percent: +v("max_error_rate_percent"), max_p95_ms: v("max_p95_ms") ? +v("max_p95_ms") : null },
   };
   const profile = parseProfile(v("profile"));
-  if (profile.length) cfg.profile = profile;
+  if (profile.length) {               // the profile's highest step is the peak; steps carry their own ramps
+    cfg.profile = profile; delete cfg.users; cfg.ramp_up_seconds = 0;
+  }
+  if (v("stop_error_rate") || v("stop_p95_ms")) {
+    cfg.stop_when = { error_rate_percent: v("stop_error_rate") ? +v("stop_error_rate") : null,
+      p95_ms: v("stop_p95_ms") ? +v("stop_p95_ms") : null, for_seconds: +v("stop_for_seconds") || 10 };
+  }
   if (v("body").trim() && v("method") !== "GET") cfg.body = v("body");
   return cfg;
 }
@@ -75,12 +203,34 @@ function verdictLine(run) {
   if (run.status === "failed" && run.error) return { cls: "fail", text: run.error };
   if (!m || m.verdict === "no_data") return { cls: "fail", text: "The test produced no results." };
   const facts = `${fmt(m.total_requests)} requests, ${fmt(m.error_rate_percent, 2)}% errors, p95 ${fmt(m.response_time_ms.p95)} ms.`;
+  const bp = m.breaking_point;
+  if (bp) return { cls: "fail", text: `Breaking point: ${fmt(bp.users)} users, when ${bp.reason}. Stopped after ${fmt(bp.t)} s. ${facts}` };
   if (m.verdict === "pass") return { cls: "pass", text: `Passed. ${facts}` };
   return { cls: "fail", text: `Failed. ${facts}` };
 }
 
-function drawCharts(points) {
+// "Spike · 5 → 500 → 5 users over 60s" or "Load · 10 users · 60s with 6s ramp-up".
+function loadDescription(c) {
+  const type = TEST_TYPES[c.test_type || "load"] || "Load";
+  if (c.profile) {
+    const steps = c.profile.map(s => `${s.users}${s.ramp_seconds ? ` (over ${showSeconds(s.ramp_seconds)})` : ""} at ${showSeconds(s.time_seconds)}`);
+    return `${type} · ${steps.join(" → ")} · ${c.duration_seconds}s`;
+  }
+  return `${type} · ${c.users} users · ${c.duration_seconds}s${c.ramp_up_seconds ? ` with ${c.ramp_up_seconds}s ramp-up` : ""}`;
+}
+
+function failureBreakdown(m) {
+  if (!m.failed_requests) return null;
+  const parts = [[m.status_code_failures, "wrong status code"], [m.assertion_failures, "failed a check"],
+    [m.connection_failures, "could not connect or timed out"]].filter(([n]) => n);
+  return parts.length ? h("p", { class: "empty" }, `Failed requests: ${parts.map(([n, t]) => `${fmt(n)} ${t}`).join(" · ")}.`) : null;
+}
+
+function drawCharts(points, config, bucket) {
   const labels = points.map(p => `${p.t}s`);
+  const plan = config ? profileCurve(config.profile, config.duration_seconds, config.users, config.ramp_up_seconds) : null;
+  // Like the active users (the most seen in each interval), the most users planned in each interval.
+  const planned = (t) => Math.round(Math.max(usersAt(plan, t), usersAt(plan, t + bucket - 0.001)));
   const base = { responsive: true, maintainAspectRatio: false, animation: false,
     interaction: { mode: "index", intersect: false }, plugins: { legend: { position: "bottom", labels: { boxWidth: 12 } } },
     scales: { x: { grid: { display: false }, ticks: { maxTicksLimit: 12 } } } };
@@ -93,6 +243,8 @@ function drawCharts(points) {
   mk("chart-latency", { type: "line", data: { labels, datasets: [
       { label: "Active users", data: points.map(p => p.users), yAxisID: "users", fill: true, stepped: true,
         borderWidth: 0, backgroundColor: "rgba(15,110,140,.14)", pointRadius: 0, order: 3 },
+      ...(plan ? [{ label: "Planned users", data: points.map(p => planned(p.t)), yAxisID: "users", stepped: true,
+        borderColor: "#5a6b7b", backgroundColor: "#5a6b7b", borderWidth: 1.5, borderDash: [3, 3], pointRadius: 0, order: 4 }] : []),
       { label: "p95 response time (ms)", data: points.map(p => p.p95_ms), yAxisID: "ms", borderColor: "#0f6e8c", backgroundColor: "#0f6e8c", borderWidth: 2.5, pointRadius: 0, tension: .25, order: 1 },
       { label: "Average (ms)", data: points.map(p => p.avg_ms), yAxisID: "ms", borderColor: "#16222e", backgroundColor: "#16222e", borderWidth: 1.5, borderDash: [5, 4], pointRadius: 0, tension: .25, order: 2 } ] },
     options: { ...base, scales: { ...base.scales,
@@ -136,7 +288,7 @@ function renderRun(run, points, focusKey) {
     h("div", { class: "head" },
       h("div", {},
         h("h1", {}, run.name, " ", badge(run)),
-        h("div", { class: "url" }, `${c.method} ${c.target_url} · ${c.profile ? `step load to ${c.users} users` : `${c.users} users`} · ${c.duration_seconds}s${c.profile ? ` · ${c.profile.map(s => `${s.users} at ${s.time_seconds}s`).join(" → ")}` : c.ramp_up_seconds ? ` with ${c.ramp_up_seconds}s ramp-up` : ""}${headersShown ? ` · ${headersShown} custom header${headersShown > 1 ? "s" : ""}` : ""}`),
+        h("div", { class: "url" }, `${c.method} ${c.target_url} · ${loadDescription(c)}${c.stop_when ? " · stops at the breaking point" : ""}${headersShown ? ` · ${headersShown} custom header${headersShown > 1 ? "s" : ""}` : ""}`),
         running ? h("p", { class: "verdict" }, "Running. Results update every two seconds.") : (v && h("p", { class: `verdict ${v.cls}` }, v.text))),
       running ? h("button", { class: "btn danger", onclick: stopRun }, "Stop test") : null),
     running ? h("div", { class: "progress" }, h("div", { style: `width:${pct}%` })) : null,
@@ -152,6 +304,7 @@ function renderRun(run, points, focusKey) {
       stat(`${fmt(m.response_time_ms.p99)} ms`, "p99"),
       stat(fmt(m.throughput_rps, 1), "Requests per second"),
       stat(fmt(m.peak_users), "Peak users")) : null,
+    m && m.total_requests ? failureBreakdown(m) : null,
 
     m && m.total_requests ? h("div", { class: "hero" }, h("h2", {}, "Throughput and errors"),
       h("div", { class: "chartbox small" }, h("canvas", { id: "chart-throughput" }))) : null,
@@ -169,7 +322,7 @@ function renderRun(run, points, focusKey) {
         running ? null : dl("", "JMeter HTML report"), dl("metrics.json", "Metrics (JSON)"), dl("results.csv", "Raw results (CSV)"),
         dl("plan.jmx", "Test plan (.jmx)"), dl("jmeter.log", "JMeter log"))));
 
-  if (points.length) drawCharts(points);
+  if (points.length) drawCharts(points, c, points.length > 1 ? points[1].t - points[0].t : 2);
   if (!running) drawAnalysis();
   window.scrollTo(0, scrollY);
   restoreFocus(focusKey);

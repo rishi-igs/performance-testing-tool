@@ -1,0 +1,21 @@
+# Breakpoint test: add users steadily until the target fails, then stop. Run it with:
+#   cd backend && python -m app.cli run ../config/breakpoint.yaml
+# The run stops itself once the last 10 seconds have more than 5% errors or a p95 over 2 s;
+# the summary names the load at that moment (the breaking point).
+name: Local breakpoint example
+test_type: breakpoint
+target_url: http://127.0.0.1:9000/error?rate=0.02
+duration_seconds: 5m
+profile:
+  - time: 0s
+    users: 1
+  - time: 1s
+    users: 100
+    ramp: 4m
+stop_when:
+  error_rate_percent: 5
+  p95_ms: 2000
+  for_seconds: 10
+thresholds:
+  max_error_rate_percent: 5
+  max_p95_ms: 2000

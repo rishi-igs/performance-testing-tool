@@ -50,6 +50,26 @@ def test_cohorts_follow_ramp_up_hold_and_ramp_down():
         Schedule(iterations=5, ramp_down_seconds=3)
 
 
+def test_a_profile_schedule_is_scaled_to_each_group():
+    spike = {"duration_seconds": 60, "profile": [{"time": 0, "users": 10}, {"time": 20, "users": 100},
+                                                 {"time": 40, "users": 10}]}
+    plan, root = build({"name": "Spike", "schedule": spike,
+                        "groups": [{"name": "A", "script_id": "s1", "users": 20}, {"name": "B", "script_id": "s2", "users": 10}]})
+    tgs = [props(el) for el, _ in thread_groups(root)]
+    assert [(p["ThreadGroup.num_threads"], p["ThreadGroup.delay"], p["ThreadGroup.duration"]) for p in tgs] == [
+        ("2", "0", "60"), ("18", "20", "20"), ("1", "0", "60"), ("9", "20", "20")]
+    assert [el.get("testname") for el, _ in thread_groups(root)][:2] == ["A · step 1", "A · step 2"]
+    assert plan.total_users == 30 and plan.duration_seconds == 60
+    curve = planned_users(ScenarioConfig(name="s", schedule=spike, groups=[{"name": "A", "script_id": "s1", "users": 20}]),
+                          step=10)["groups"]["A"]
+    assert [p["users"] for p in curve] == [2, 2, 20, 20, 2, 2, 0]
+    with pytest.raises(ValidationError, match="replaces the start delay"):
+        Schedule(ramp_up_seconds=5, **spike)
+    with pytest.raises(ValidationError, match="without ramp-down or profile"):
+        ScenarioConfig(name="g", mode="goal", goal={"type": "hits_per_second", "target": 5, "max_users": 5},
+                       schedule=spike, groups=[{"name": "A", "script_id": "s1"}])
+
+
 def test_planned_users_draw_the_schedule():
     cfg = ScenarioConfig(name="s", schedule={"ramp_up_seconds": 10, "duration_seconds": 10, "ramp_down_seconds": 10},
                          groups=[{"name": "A", "script_id": "s1", "users": 10}])

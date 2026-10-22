@@ -109,10 +109,13 @@ function renderScenarioRun(run, tl, focusKey) {
   let pct = 0;
   if (running && run.started_at) pct = Math.min(100, ((Date.now() - Date.parse(run.started_at)) / 1000) / (c.duration_seconds || 1) * 100);
   const failedSla = m && m.sla ? m.sla.filter(r => r.status === "fail").length : 0;
+  const bp = m && m.breaking_point;
   const verdict = running ? "Running. Results update every two seconds."
     : run.status === "failed" && run.error ? run.error
       : !m || m.verdict === "no_data" ? "The run produced no results."
-        : `${m.verdict === "pass" ? "Passed" : "Failed"}: ${fmt(m.requests.total_requests)} requests, ${fmt(m.requests.error_rate_percent, 2)}% errors`
+        : (bp ? `Breaking point: ${fmt(bp.users)} users, when ${bp.reason}. Stopped after ${fmt(bp.t)} s. `
+          : `${m.verdict === "pass" ? "Passed" : "Failed"}: `)
+          + `${fmt(m.requests.total_requests)} requests, ${fmt(m.requests.error_rate_percent, 2)}% errors`
           + (m.sla.length ? `, ${failedSla ? `${failedSla} of ${m.sla.length} SLA checks missed` : `all ${m.sla.length} SLA checks met`}.` : ".");
   const dl = (path, label) => h("a", { class: "btn quiet", href: `/reports/${id}/${path}`, target: path === "" ? "_blank" : null, rel: "noopener" }, label);
 

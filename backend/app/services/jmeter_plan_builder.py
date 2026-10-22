@@ -8,8 +8,10 @@ from typing import Any, Iterable
 from urllib.parse import SplitResult, urlsplit
 
 from ..models.test_config import LoadTestConfig
+from . import load_profile
 
 JMETER_VERSION = "5.6.3"
+STATUS_CHECK = "Expected status code"          # name of the Response Assertion on the status code
 
 # JMeter ResponseAssertion test_type bits: Equals (8) + Or (32)
 _EQUALS_OR = 40
@@ -89,7 +91,7 @@ def _add_status_assertion(parent_tree: ET.Element, codes: Iterable[int], *, igno
     ignore_status=True is JMeter's "Ignore Status" option: without it JMeter marks every 4xx/5xx
     response as failed before the assertion runs, even when that code is the expected one.
     """
-    ra, _ = _element(parent_tree, "ResponseAssertion", "AssertionGui", "ResponseAssertion", "Expected status code")
+    ra, _ = _element(parent_tree, "ResponseAssertion", "AssertionGui", "ResponseAssertion", STATUS_CHECK)
     strings = ET.SubElement(ra, "collectionProp", {"name": "Asserion.test_strings"})  # sic: JMeter's spelling
     for code in codes:
         _prop(strings, "stringProp", str(code), code)
@@ -160,17 +162,11 @@ def build_plan(config: LoadTestConfig) -> str:
     if config.profile is None:
         cohorts = [(config.users, "", config.duration_seconds, "Virtual users", config.ramp_up_seconds)]
     else:
-        cohorts = []
-        previous_users = 0
-        for index, step in enumerate(config.profile):
-            cohorts.append((
-                step.users - previous_users,
-                step.time_seconds,
-                config.duration_seconds - step.time_seconds,
-                f"Step {index + 1}: {step.users} users",
-                0,
-            ))
-            previous_users = step.users
+        def label(step: int, users: int, part: int, parts: int) -> str:
+            return f"Step {step + 1}: {users} users" + (f" ({part}/{parts})" if parts > 1 else "")
+
+        cohorts = [(c.users, c.delay, c.duration, c.label, c.ramp)
+                   for c in load_profile.cohorts(config.profile, config.duration_seconds, label)]
 
     for users, delay, duration, group_name, ramp_time in cohorts:
         _add_thread_group(
